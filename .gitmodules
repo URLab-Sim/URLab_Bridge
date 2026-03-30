@@ -1,0 +1,3 @@
+[submodule "RoboJuDo"]
+	path = RoboJuDo
+	url = https://github.com/HansZ8/RoboJuDo.git
