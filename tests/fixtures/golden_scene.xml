@@ -1,0 +1,43 @@
+<!--
+  URLab integration-test golden scene.
+  Minimal MJCF exercising: floor + light, 2-DOF arm with position
+  actuators + jointpos sensors. Hand-stable; do not edit without
+  regenerating tests/integration/_golden/trajectory.npz.
+
+  No standalone free-jointed entity here: URLab's MJCF importer
+  currently bundles every body into one Blueprint = one
+  AAMjArticulation, so non-articulation entities don't surface as
+  separate URLabEntity. Tracked as future work; entity-stream
+  coverage can land in a follow-up test once the importer splits.
+-->
+<mujoco model="urlab_golden_scene">
+    <option timestep="0.002" integrator="implicitfast"/>
+
+    <worldbody>
+        <light pos="0 0 3" dir="0 0 -1"/>
+        <geom name="floor" type="plane" size="2 2 0.1" rgba="0.6 0.6 0.6 1"/>
+
+        <body name="arm_base" pos="0 0 0.1">
+            <geom name="base" type="cylinder" size="0.05 0.05" rgba="0.7 0.2 0.2 1"/>
+            <body name="link1" pos="0 0 0.05">
+                <joint name="shoulder" type="hinge" axis="0 1 0" range="-1.5 1.5"/>
+                <geom name="link1_geom" type="capsule" fromto="0 0 0 0.2 0 0" size="0.02" rgba="0.3 0.5 0.8 1"/>
+                <camera name="head" pos="0.05 0 0.1" euler="0 -1.5708 0" fovy="60"/>
+                <body name="link2" pos="0.2 0 0">
+                    <joint name="elbow" type="hinge" axis="0 1 0" range="-1.5 1.5"/>
+                    <geom name="link2_geom" type="capsule" fromto="0 0 0 0.15 0 0" size="0.015" rgba="0.3 0.8 0.5 1"/>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+
+    <actuator>
+        <position name="shoulder_act" joint="shoulder" kp="50"/>
+        <position name="elbow_act" joint="elbow" kp="50"/>
+    </actuator>
+
+    <sensor>
+        <jointpos name="shoulder_pos" joint="shoulder"/>
+        <jointpos name="elbow_pos" joint="elbow"/>
+    </sensor>
+</mujoco>

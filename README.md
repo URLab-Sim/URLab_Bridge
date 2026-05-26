@@ -35,6 +35,22 @@ uv run src/run.py --test --prefix g1
 
 ```
 
+## Documentation
+
+The Python API docs live in the main URLab plugin repository alongside
+the rest of the URLab documentation:
+
+- [Python Getting Started](https://github.com/URLab-Sim/UnrealRoboticsLab/blob/main/docs/python/getting_started.md) —
+  guided walkthrough: connect, author a scene, run PIE, step the sim,
+  send control, work with cameras, add a new policy.
+- [Python API Reference](https://github.com/URLab-Sim/UnrealRoboticsLab/blob/main/docs/python/api.md) —
+  full reference for `URLabClient` and the `scene` / `sim` / `runtime`
+  / `outliner` / `debug` / `viewport` / `recording` / `replay`
+  namespaces.
+- [URLab docs index](https://github.com/URLab-Sim/UnrealRoboticsLab/blob/main/docs/index.md) —
+  everything else: MJCF import, scene authoring, controllers, debug
+  visualisation, recording / replay.
+
 ## Available Policies
 
 | Key                | Robot   | DOF | Description                              | Requires PHC |
@@ -67,11 +83,11 @@ URLab publishes binary-packed data over ZeroMQ PUB/SUB sockets. All topics are p
 
 ## ROS 2 Bridge
 
-`ros2_broadcaster.py` republishes ZMQ streams as standard ROS 2 topics (JointState, Image, Float64MultiArray). Requires a sourced ROS 2 workspace (Humble/Jazzy).
+`urlab_tools.ros2_broadcaster` republishes ZMQ streams as standard ROS 2 topics (JointState, Image, Float64MultiArray). Requires a sourced ROS 2 workspace (Humble/Jazzy).
 
 ```bash
 source /opt/ros/humble/setup.bash
-uv run src/ros2_broadcaster.py
+uv run python -m urlab_tools.ros2_broadcaster
 ```
 
 ## License

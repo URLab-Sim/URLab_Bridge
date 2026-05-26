@@ -10,39 +10,97 @@ urls = {Homepage = "https://github.com/URLab-Sim/urlab_bridge", Documentation = 
 dependencies = [
     "pyzmq>=25.0.0",
     "numpy>=1.26.0",
-    "opencv-python>=4.8.0",
-    "dearpygui>=1.11.1",
+    # URLab remote-stepping client (section 6 of plan_remote_stepping.md):
+    # MuJoCo version pinned to URLab's submodule build (third_party/MuJoCo
+    # currently at 3.8.1). mismatch is rejected at handshake unless the
+    # caller passes mujoco_version_check=False.
+    "mujoco==3.8.1",
+    "msgpack>=1.0.0",
+    # gymnasium for the URLabEnv gym adapter.
+    "gymnasium>=1.0.0",
 ]
 
 [project.optional-dependencies]
-policy = [
-    # Core ML
+# UI: dearpygui shell + opencv for image conversions in the camera /
+# recording tabs.
+ui = [
+    "dearpygui>=1.11.1",
+    "opencv-python>=4.8.0",
+]
+# RoboJuDo policy stack. The local ./RoboJuDo submodule is bound via the
+# [tool.uv.sources] section below; uv sync --extra robojudo installs it
+# editable alongside the listed deps. Don't `pip install -e ./RoboJuDo`
+# separately -- the next `uv sync` will drop it because uv enforces the
+# lock against pyproject. Use the extra.
+robojudo = [
+    "robojudo",
     "torch>=2.0.0",
     "onnxruntime>=1.16.0",
     "scipy>=1.11.0",
-    # MuJoCo
-    "mujoco>=3.2.0",
-    # RoboJuDo dependencies
     "pydantic>=2.0.0",
     "python-box>=7.0.0",
     "tqdm>=4.65.0",
     "pyyaml>=6.0",
     "easydict>=1.10",
-    "msgpack>=1.0.0",
     "msgpack-numpy>=0.4.8",
     "colorlog>=6.7.0",
     "joblib>=1.3.0",
 ]
+# mjlab eval-time runner.
+# mujoco-warp is pinned to 3.8.1 explicitly: mjlab 1.3.0 (the latest at
+# the time of writing) transitively brings mujoco-warp 3.7.0.1, which
+# references `mujoco.mjtEnableBit.mjENBL_MULTICCD` -- a value that was
+# removed in mujoco 3.8.x. With the bridge pinned to mujoco 3.8.1, the
+# import-time enum lookup fails with AttributeError and the mjlab
+# registry is silently skipped. mujoco-warp 3.8.1 has the matching API.
+mjlab = [
+    "mjlab",
+    "mujoco-warp==3.8.1",
+    "torch>=2.0.0",
+]
+# ROS 2 rebroadcaster: rclpy / std_msgs / sensor_msgs / cv_bridge come
+# from a sourced ROS distribution (Humble / Jazzy). Pip can't install
+# them, so the extra is intentionally empty.
+ros2 = []
+dev = [
+    "pytest>=9.0.3",
+    "ruff",
+]
 
 [project.scripts]
-urlab-policy = "urlab_policy.dashboard:main"
+urlab-ui     = "urlab_bridge.cli.ui:main"
+urlab-ping   = "urlab_bridge.cli.ping:main"
+urlab-test   = "urlab_bridge.cli.test:main"
+urlab-policy = "urlab_bridge.cli.policy:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.uv.sources]
+# Bind the `robojudo` requirement (listed in [project.optional-dependencies]
+# robojudo) to the in-tree submodule path, editable. Without this, uv would
+# look for `robojudo` on PyPI (where it doesn't exist) and fail to resolve
+# the extra. With this, `uv sync --extra robojudo` builds + installs the
+# submodule and survives subsequent `uv sync` calls.
+robojudo = { path = "./RoboJuDo", editable = true }
+
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/urlab_policy"]
+packages = [
+    "src/urlab_bridge",
+    "src/urlab_client",
+    "src/urlab_policy",
+    "src/urlab_dashboard",
+    "src/urlab_tools",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
