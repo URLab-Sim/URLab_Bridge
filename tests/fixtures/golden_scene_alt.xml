@@ -1,0 +1,20 @@
+<!--
+  Alternative MJCF for tests that need a distinct BP class. The
+  importer derives the BP path from the file stem, so this file just
+  needs a different name. Kept minimal: a single pendulum.
+-->
+<mujoco model="urlab_golden_scene_alt">
+    <option timestep="0.002" integrator="implicitfast"/>
+
+    <worldbody>
+        <light pos="0 0 3" dir="0 0 -1"/>
+        <body name="pendulum_base" pos="0 0 0.5">
+            <geom name="rod" type="capsule" fromto="0 0 0 0.0 0 -0.3" size="0.01" rgba="0.8 0.4 0.2 1"/>
+            <joint name="pivot" type="hinge" axis="0 1 0"/>
+        </body>
+    </worldbody>
+
+    <actuator>
+        <position name="pivot_act" joint="pivot" kp="20"/>
+    </actuator>
+</mujoco>

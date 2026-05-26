@@ -11,3 +11,8 @@ uv.lock
 assets/models/**/*.jit
 assets/models/**/*.pt
 assets/models/**/*.onnx
+
+# URLab MJCF importer writes a translated `<name>_ue.xml` next to
+# source MJCFs at import_xml time. Generated artifact; regenerated
+# every test run.
+tests/fixtures/*_ue.xml
