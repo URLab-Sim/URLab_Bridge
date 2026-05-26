@@ -12,4 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .go2_wtw_policy_cfg import *  # noqa: F401, F403
+"""LeRobot-bound policy registry entries.
+
+Empty placeholder. Add entries when a curated LeRobot policy is ready
+to ship through the launcher dropdown.
+"""
+
+from __future__ import annotations
+
+
+POLICIES: dict[str, dict] = {}

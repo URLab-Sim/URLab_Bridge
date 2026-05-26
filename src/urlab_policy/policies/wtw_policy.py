@@ -1,5 +1,16 @@
 # Copyright (c) 2026 Jonathan Embley-Riches. All rights reserved.
-# Licensed under the Apache License, Version 2.0.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Walk-These-Ways policy for quadruped locomotion (Unitree Go2).
@@ -25,8 +36,9 @@ import numpy as np
 import torch
 
 from robojudo.policy import Policy, policy_registry
-from robojudo.policy.policy_cfgs import WalkTheseWaysPolicyCfg
 from robojudo.utils.util_func import command_remap, get_gravity_orientation
+
+from urlab_policy.configs.wtw_policy_cfg import WalkTheseWaysPolicyCfg
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +107,12 @@ class WalkTheseWaysPolicy(Policy):
         self.obs_history_buf.clear()
         for _ in range(self.cfg_policy.history_length):
             self.obs_history_buf.append(np.zeros(self.num_obs_per_step, dtype=np.float32))
+        # Both action buffers must zero — `last_action` is read in
+        # `get_observation` for the current step's `actions` slot, while
+        # `prev_actions` feeds the `prev_actions` slot. Without resetting
+        # `last_action` here, episode-2+ inherits the final action of the
+        # previous run.
+        self.last_action = np.zeros(self.num_actions, dtype=np.float32)
         self.prev_actions = np.zeros(self.num_actions, dtype=np.float32)
         self.gait_phase = np.array([0.0, 0.5], dtype=np.float32)
         self._is_standing = True
