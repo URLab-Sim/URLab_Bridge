@@ -12,4 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .go2_wtw_policy_cfg import *  # noqa: F401, F403
+"""``python -m urlab_policy.adapters.mjlab`` -> run the export tool."""
+
+from .export import _main
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_main())

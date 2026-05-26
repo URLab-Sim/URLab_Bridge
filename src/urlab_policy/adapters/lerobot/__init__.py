@@ -12,4 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .go2_wtw_policy_cfg import *  # noqa: F401, F403
+"""URLab adapter for LeRobot policies (placeholder).
+
+The runner code lives at ``src/urlab_policy/lerobot_runner.py`` and is
+intentionally untracked while the integration is iterating. Once the
+runner stabilises and the user opts to track it, move it into
+``runner.py`` here and re-export from this ``__init__``.
+"""
