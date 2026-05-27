@@ -701,6 +701,21 @@ class URLabClient:
         self._absorb_step_reply(reply)
         return reply
 
+    def forward(self) -> Dict[str, Any]:
+        """Run ``mj_forward`` on the server (kinematics + dynamics, no
+        integration) and return observations.
+
+        Use this after writing ``qpos`` / ``qvel`` via
+        :meth:`runtime.set_qpos` to read consistent derived state
+        (``xpos``, sensors, contacts) without advancing simulation time.
+        The reply shape matches a normal step reply, so articulation
+        accessors (``art.qpos_array``, ``art.root_pos_w``, etc.) refresh
+        as usual.
+        """
+        reply = self._rpc("forward", {}, expected_op="forward_ok")
+        self._absorb_step_reply(reply)
+        return reply
+
 
     def _mirror_set_qpos_locally(self, reply: Mapping[str, Any]) -> None:
         if self.model is None or self.data is None:

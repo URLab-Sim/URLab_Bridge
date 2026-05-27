@@ -140,6 +140,8 @@ class _RuntimeNamespace(_RpcNamespace):
         enable_multiccd: Optional[bool] = None,
         enable_sleep: Optional[bool] = None,
         sleep_tolerance: Optional[float] = None,
+        disableflags: Optional[int] = None,
+        enableflags: Optional[int] = None,
     ) -> SimOptions:
         """Push MuJoCo sim options into the live UE model. MuJoCo-native
         SI units. Only fields you pass override; everything else keeps
@@ -166,6 +168,8 @@ class _RuntimeNamespace(_RpcNamespace):
         if enable_multiccd   is not None: opts["enable_multiccd"]   = bool(enable_multiccd)
         if enable_sleep      is not None: opts["enable_sleep"]      = bool(enable_sleep)
         if sleep_tolerance   is not None: opts["sleep_tolerance"]   = float(sleep_tolerance)
+        if disableflags      is not None: opts["disableflags"]      = int(disableflags)
+        if enableflags       is not None: opts["enableflags"]       = int(enableflags)
 
         if not opts:
             raise ValueError("set_sim_options requires at least one field")
