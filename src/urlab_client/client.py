@@ -492,6 +492,38 @@ class URLabClient:
                 reply["cameras"] = cams
         return reply
 
+    @staticmethod
+    def _wire_include_cameras(
+        include_cameras: Union[bool, Mapping[str, Any]],
+    ) -> Any:
+        """Serialize ``include_cameras`` for the wire, preserving value types
+        so the server reads per-camera modes AND frame-id requests:
+
+        - ``"latest"`` / ``"sync"`` -> string mode (latest available frame)
+        - ``int``                   -> a ``frame_id`` (the frame showing the
+                                       state at/after that step)
+        - ``{"frame_id": int}``     -> same, explicit
+
+        A bare ``True`` / ``False`` collapses to all-or-nothing. Note: a value
+        must NOT be coerced to ``str`` (an int frame_id stringified to
+        ``"123"`` would be read by the server as a mode and ignored)."""
+        if not isinstance(include_cameras, Mapping):
+            return bool(include_cameras)
+        out: Dict[str, Any] = {}
+        for k, v in include_cameras.items():
+            if isinstance(v, bool):
+                out[str(k)] = "latest"
+            elif isinstance(v, int):
+                out[str(k)] = int(v)  # frame_id
+            elif isinstance(v, Mapping):
+                entry: Dict[str, Any] = {}
+                if "frame_id" in v:
+                    entry["frame_id"] = int(v["frame_id"])
+                out[str(k)] = entry
+            else:
+                out[str(k)] = str(v)  # "latest" / "sync"
+        return out
+
     def _step_direct(
         self, n_steps: int, *, include_cameras: Union[bool, Mapping[str, Any]],
         observations: str,
@@ -505,11 +537,7 @@ class URLabClient:
         # `{cam: "sync"}` to `True`, which the server's TryGetObjectField
         # rejects -- no cameras block comes back and `latest_frame` stays
         # None on the client.
-        wire_cameras: Any = (
-            {str(k): str(v) for k, v in include_cameras.items()}
-            if isinstance(include_cameras, Mapping)
-            else bool(include_cameras)
-        )
+        wire_cameras: Any = self._wire_include_cameras(include_cameras)
         request: Dict[str, Any] = {
             "n_steps": int(n_steps),
             "observations": observations,
@@ -544,11 +572,7 @@ class URLabClient:
             mujoco.mj_step(self.model, self.data)
 
         # Preserve the mapping form on the wire (see _step_direct).
-        wire_cameras: Any = (
-            {str(k): str(v) for k, v in include_cameras.items()}
-            if isinstance(include_cameras, Mapping)
-            else bool(include_cameras)
-        )
+        wire_cameras: Any = self._wire_include_cameras(include_cameras)
         request: Dict[str, Any] = {
             "mode": wire(StepMode.PUPPET),
             "n_steps": int(n_steps),
@@ -573,6 +597,21 @@ class URLabClient:
         to live.
         """
         self._transport.start_state_stream(self._on_state_snapshot)
+        # UE's bEnableAllCameras now defaults off: a camera only runs its pub
+        # streams while broadcast-enabled or requested. Explicitly enable ZMQ
+        # broadcast on the cameras we're about to subscribe to. Best-effort —
+        # an older server without set_camera_streaming just ignores the failure
+        # and relies on its own default.
+        enable: Dict[str, Any] = {}
+        for art in self.articulations.values():
+            for cam_name, view in art.cameras.items():
+                if getattr(view, "_zmq_topic", None) and getattr(view, "_zmq_endpoint", None):
+                    enable[cam_name] = {"zmq": True}
+        if enable:
+            try:
+                self.runtime.set_camera_streaming(enable)
+            except Exception as exc:  # pragma: no cover - older server / transport
+                logger.debug("set_camera_streaming at stream startup failed: %s", exc)
         # One per-camera stream; the transport dedupes on (prefix, name).
         for art in self.articulations.values():
             for cam_name, view in art.cameras.items():
@@ -893,7 +932,14 @@ class URLabClient:
                             if arr.size == w * h:
                                 view.latest_frame = arr.reshape((h, w))
                                 view.frame_count += 1
-                                view.sim_time = self.sim_time
+                                view.sim_time = (
+                                    float(cam_payload["sim_time"])
+                                    if isinstance(cam_payload.get("sim_time"), (int, float))
+                                    else self.sim_time
+                                )
+                                _fid = cam_payload.get("frame_id")
+                                if _fid is not None:
+                                    view.frame_id = int(_fid)
                         else:
                             arr = np.frombuffer(pixels, dtype=np.uint8)
                             if arr.size == w * h * 4:
@@ -903,7 +949,14 @@ class URLabClient:
                                 else:
                                     view.latest_frame = bgra
                                 view.frame_count += 1
-                                view.sim_time = self.sim_time
+                                view.sim_time = (
+                                    float(cam_payload["sim_time"])
+                                    if isinstance(cam_payload.get("sim_time"), (int, float))
+                                    else self.sim_time
+                                )
+                                _fid = cam_payload.get("frame_id")
+                                if _fid is not None:
+                                    view.frame_id = int(_fid)
                     except Exception as exc:
                         logger.debug(
                             "include_cameras decode failed (%s/%s): %s",

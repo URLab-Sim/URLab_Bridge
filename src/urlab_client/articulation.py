@@ -172,6 +172,10 @@ class URLabCameraView:
     latest_frame: Optional[np.ndarray] = None
     sim_time: Optional[float] = None
     frame_count: int = 0
+    # Post-step render-snapshot id of `latest_frame` (the step state it shows).
+    # Set from the step reply's per-camera `frame_id` (decoupled streaming /
+    # frame-id association). None until the first id-tagged frame arrives.
+    frame_id: Optional[int] = None
 
     @classmethod
     def from_handshake(

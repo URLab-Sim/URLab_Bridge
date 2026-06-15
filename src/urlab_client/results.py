@@ -102,6 +102,10 @@ class SimOptions:
     enable_multiccd: Optional[bool] = None
     enable_sleep: Optional[bool] = None
     sleep_tolerance: Optional[float] = None
+    # mju_threadpool worker count applied to the live mjData (0 = single
+    # threaded). max_worker_threads is the server's CPU-core clamp (read-only).
+    num_worker_threads: Optional[int] = None
+    max_worker_threads: Optional[int] = None
 
 
 def _sim_options_from_wire(opts: Mapping[str, Any]) -> SimOptions:
@@ -147,6 +151,8 @@ def _sim_options_from_wire(opts: Mapping[str, Any]) -> SimOptions:
         enable_multiccd=_b(opts.get("enable_multiccd")),
         enable_sleep=_b(opts.get("enable_sleep")),
         sleep_tolerance=_f(opts.get("sleep_tolerance")),
+        num_worker_threads=_i(opts.get("num_worker_threads")),
+        max_worker_threads=_i(opts.get("max_worker_threads")),
     )
 
 
