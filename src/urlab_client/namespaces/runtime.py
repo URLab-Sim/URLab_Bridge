@@ -52,6 +52,39 @@ class _RuntimeNamespace(_RpcNamespace):
         )
         return bool(reply.get("paused", paused))
 
+    def set_camera_streaming(
+        self, cameras: Mapping[str, Union[bool, Mapping[str, bool]]]
+    ) -> Dict[str, Any]:
+        """Enable/disable per-camera ZMQ/SHM broadcast streams at runtime.
+
+        Needed because UE's ``bEnableAllCameras`` now defaults off: a camera
+        only runs its pub streams while broadcast-enabled (here) or requested
+        via ``include_cameras``. Keys are canonical camera names (the
+        ``camera_topics`` keys from the handshake). Values:
+
+        - ``True`` / ``False`` — both transports on / off
+        - ``{"zmq": bool, "shm": bool}`` — per-transport
+
+        Returns the per-camera reply ``{canonical: {streaming, zmq, shm,
+        zmq_endpoint, zmq_topic}}`` so you know exactly where to subscribe.
+        """
+        wire: Dict[str, Any] = {}
+        for key, val in cameras.items():
+            if isinstance(val, Mapping):
+                entry: Dict[str, bool] = {}
+                if "zmq" in val:
+                    entry["zmq"] = bool(val["zmq"])
+                if "shm" in val:
+                    entry["shm"] = bool(val["shm"])
+                wire[str(key)] = entry
+            else:
+                wire[str(key)] = bool(val)
+        reply = self._client._rpc(
+            "set_camera_streaming", {"cameras": wire},
+            expected_op="set_camera_streaming_ok",
+        )
+        return dict(reply.get("cameras") or {})
+
     def set_sim_speed(self, percent: float) -> float:
         reply = self._client._rpc(
             "set_sim_speed", {"percent": float(percent)},
@@ -142,6 +175,7 @@ class _RuntimeNamespace(_RpcNamespace):
         sleep_tolerance: Optional[float] = None,
         disableflags: Optional[int] = None,
         enableflags: Optional[int] = None,
+        num_worker_threads: Optional[int] = None,
     ) -> SimOptions:
         """Push MuJoCo sim options into the live UE model. MuJoCo-native
         SI units. Only fields you pass override; everything else keeps
@@ -170,6 +204,7 @@ class _RuntimeNamespace(_RpcNamespace):
         if sleep_tolerance   is not None: opts["sleep_tolerance"]   = float(sleep_tolerance)
         if disableflags      is not None: opts["disableflags"]      = int(disableflags)
         if enableflags       is not None: opts["enableflags"]       = int(enableflags)
+        if num_worker_threads is not None: opts["num_worker_threads"] = int(num_worker_threads)
 
         if not opts:
             raise ValueError("set_sim_options requires at least one field")
