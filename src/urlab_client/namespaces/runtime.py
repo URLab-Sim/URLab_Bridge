@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Sequence, TYPE_CHECKING, Union
 
 from .base import _RpcNamespace
@@ -243,9 +244,10 @@ class _RuntimeNamespace(_RpcNamespace):
         return _sim_options_from_wire(result)
 
     def set_mode(self, mode: Union[str, StepMode]) -> StepMode:
-        """Promote / demote the server's step mode. Side effect: in
-        live we keep streaming SUB sockets up, in direct/puppet
-        we tear them down (server pauses publishers in those modes)."""
+        """Promote / demote the server's step mode. Camera frames stream over
+        SHM/ZMQ in every mode now, so we (re)start the streaming SUBs on any
+        transition and keep them up -- the server keeps camera publishers
+        running regardless of mode. ``_start_streaming_subs`` is idempotent."""
         coerced = coerce(StepMode, mode)
         reply = self._client._rpc(
             "set_mode", {"mode": wire(coerced)},
@@ -253,10 +255,7 @@ class _RuntimeNamespace(_RpcNamespace):
         )
         new_mode = coerce(StepMode, reply.get("current_mode", coerced))
         self._client.step_mode = new_mode
-        if new_mode == StepMode.LIVE:
-            self._client._start_streaming_subs()
-        else:
-            self._client._stop_streaming_subs()
+        self._client._start_streaming_subs()
         return new_mode
 
     def set_mocap_pose(

@@ -21,7 +21,7 @@ import os
 import tempfile
 import threading
 import time
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -166,6 +166,9 @@ class URLabClient:
         self._state_lock = threading.Lock()
         self._state_cond = threading.Condition(self._state_lock)
         self._latest_state_snapshot: Optional[Dict[str, Any]] = None
+        # Post-state frame_id of the most recent step() reply; get_camera(fresh=True)
+        # waits for a streamed frame >= this so the image matches the step state.
+        self._last_step_frame_id: Optional[int] = None
         self._state_msg_count: int = 0
 
         # Guards writes through `self.data` + the mj_forward calls.
@@ -488,11 +491,113 @@ class URLabClient:
             # UE's autonomous physics continuing to advance (Live).
             reply = self._step_direct(n_steps, observations=obs_str)
 
+        fid = reply.get("frame_id")
+        if fid is not None:
+            self._last_step_frame_id = int(fid)
+
         if include_cameras:
             self._attach_streamed_cameras(
                 reply, include_cameras, camera_query, camera_timeout_s
             )
         return reply
+
+    # -- camera access (decoupled getter API) -----------------------------
+
+    def camera_names(self) -> "List[str]":
+        """Canonical names of every discovered camera (per-articulation +
+        global). These are the exact keys ``get_camera`` expects."""
+        names: List[str] = []
+        for art in self.articulations.values():
+            names.extend(art.cameras.keys())
+        names.extend(self.global_cameras.keys())
+        return names
+
+    def _find_camera_view(self, name: str) -> "URLabCameraView":
+        for art in self.articulations.values():
+            view = art.cameras.get(name)
+            if view is not None:
+                return view
+        view = self.global_cameras.get(name)
+        if view is not None:
+            return view
+        raise KeyError(
+            f"camera {name!r} not found. Available cameras: {self.camera_names()}"
+        )
+
+    def warmup_cameras(
+        self,
+        names: "Optional[Sequence[str]]" = None,
+        *,
+        timeout_s: float = 10.0,
+        require_all: bool = True,
+    ) -> "List[str]":
+        """Block until every camera (or the named subset) is streaming.
+
+        Ensures the SHM/ZMQ streams are running (idempotent), then waits for
+        each camera to deliver its first frame. Call this once after
+        ``set_mode`` / scene setup so subsequent ``get_camera`` calls return
+        pixels immediately instead of ``None`` during stream warm-up.
+
+        Returns the list of cameras that became ready. With ``require_all``
+        (default) a timeout raises ``TimeoutError`` naming the cameras that
+        never produced a frame -- a loud, debuggable signal instead of a
+        silent empty image.
+        """
+        self._start_streaming_subs()  # idempotent: (re)enable + subscribe
+        target = list(names) if names is not None else self.camera_names()
+        views = {n: self._find_camera_view(n) for n in target}
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        ready: List[str] = []
+        while True:
+            ready = [n for n, v in views.items() if v.latest_frame is not None]
+            if len(ready) == len(target):
+                return ready
+            if time.monotonic() >= deadline:
+                missing = [n for n in target if n not in ready]
+                if require_all:
+                    raise TimeoutError(
+                        f"camera warm-up timed out after {timeout_s}s; no frames "
+                        f"from: {missing}. Is PIE running and the scene lit? "
+                        f"(ready: {ready})"
+                    )
+                return ready
+            time.sleep(0.02)
+
+    def get_camera(
+        self,
+        name: str,
+        *,
+        fresh: bool = False,
+        timeout_s: float = 2.0,
+    ) -> "Optional[np.ndarray]":
+        """Return the latest streamed frame for camera ``name`` (canonical).
+
+        Cameras stream asynchronously in every step mode, so this is fully
+        decoupled from ``step()`` -- call it whenever you want the current
+        image. ``fresh=True`` waits for a frame whose ``frame_id`` is >= the
+        most recent ``step()``'s post-state id, guaranteeing the frame shows
+        that step's state (or newer).
+
+        Blocks up to ``timeout_s`` for a frame to be available (covers stream
+        warm-up); returns the frame as an ``np.ndarray`` (HxWx4 RGBA for
+        real/seg, HxW float32 for depth), or ``None`` if none arrived in time.
+        Raises ``KeyError`` (listing available names) if ``name`` is unknown.
+        """
+        view = self._find_camera_view(name)
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        target = self._last_step_frame_id if fresh else None
+        while True:
+            frame = view.latest_frame
+            have = frame is not None
+            fresh_ok = (
+                target is None
+                or (view.frame_id is not None and view.frame_id >= target)
+            )
+            if have and fresh_ok:
+                return frame
+            if time.monotonic() >= deadline:
+                return frame  # may be None (never arrived) or stale (fresh timed out)
+            time.sleep(0.002)
 
     def _step_direct(
         self, n_steps: int, *, observations: str,
@@ -559,24 +664,38 @@ class URLabClient:
         to live.
         """
         self._transport.start_state_stream(self._on_state_snapshot)
-        # UE's bEnableAllCameras now defaults off: a camera only runs its pub
-        # streams while broadcast-enabled or requested. Explicitly enable ZMQ
-        # broadcast on the cameras we're about to subscribe to. Best-effort —
-        # an older server without set_camera_streaming just ignores the failure
-        # and relies on its own default.
+        # UE's bEnableAllCameras defaults off: a camera only runs its pub
+        # streams while broadcast-enabled or requested. Enable broadcast on
+        # every discovered camera and -- crucially -- read the ACTUAL per-camera
+        # endpoints back from the reply. The handshake advertises a shared
+        # default endpoint before streaming is on; each camera only binds its
+        # real (distinct) ZMQ port once enabled, and set_camera_streaming
+        # reports it. Subscribing to the stale handshake endpoint sends every
+        # camera to one port, so all but one get no frames.
         enable: Dict[str, Any] = {}
         for art in self.articulations.values():
             for cam_name, view in art.cameras.items():
+                # Only cameras the handshake advertised an endpoint/topic for are
+                # streamable. Skipping the rest also keeps this a no-op (no RPC)
+                # for camera-less / stub-transport scenes.
                 if getattr(view, "_zmq_topic", None) and getattr(view, "_zmq_endpoint", None):
-                    enable[cam_name] = {"zmq": True}
+                    enable[cam_name] = {"zmq": True, "shm": True}
+        reply: Dict[str, Any] = {}
         if enable:
             try:
-                self.runtime.set_camera_streaming(enable)
+                reply = self.runtime.set_camera_streaming(enable)
             except Exception as exc:  # pragma: no cover - older server / transport
                 logger.debug("set_camera_streaming at stream startup failed: %s", exc)
         # One per-camera stream; the transport dedupes on (prefix, name).
+        # Prefer the endpoint/topic from the set_camera_streaming reply (the
+        # bound port); fall back to the handshake values for older servers.
         for art in self.articulations.values():
             for cam_name, view in art.cameras.items():
+                info = reply.get(cam_name) or {}
+                if info.get("zmq_endpoint"):
+                    view._zmq_endpoint = info["zmq_endpoint"]
+                if info.get("zmq_topic"):
+                    view._zmq_topic = info["zmq_topic"]
                 topic = getattr(view, "_zmq_topic", None)
                 endpoint = getattr(view, "_zmq_endpoint", None)
                 if not topic or not endpoint:
