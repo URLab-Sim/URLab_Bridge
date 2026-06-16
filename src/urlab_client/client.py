@@ -35,6 +35,7 @@ from .enums import (
     wire,
 )
 from .errors import URLabRPCError, URLabTimeoutError, URLabVersionMismatch
+from .results import StepResult
 from .namespaces.debug import _DebugNamespace
 from .namespaces.outliner import _OutlinerNamespace
 from .namespaces.recording import URLabRecordingAPI
@@ -559,7 +560,7 @@ class URLabClient:
                 reply, include_cameras, camera_query, camera_timeout_s
             )
         self._last_step_monotonic = time.monotonic()
-        return reply
+        return StepResult(reply)
 
     # -- camera access (decoupled getter API) -----------------------------
 
@@ -756,11 +757,12 @@ class URLabClient:
         # bound port); fall back to the handshake values for older servers.
         for art in self.articulations.values():
             for cam_name, view in art.cameras.items():
-                info = reply.get(cam_name) or {}
-                if info.get("zmq_endpoint"):
-                    view._zmq_endpoint = info["zmq_endpoint"]
-                if info.get("zmq_topic"):
-                    view._zmq_topic = info["zmq_topic"]
+                info = reply.get(cam_name)
+                if info is not None:
+                    if info.zmq_endpoint:
+                        view._zmq_endpoint = info.zmq_endpoint
+                    if info.zmq_topic:
+                        view._zmq_topic = info.zmq_topic
                 topic = getattr(view, "_zmq_topic", None)
                 endpoint = getattr(view, "_zmq_endpoint", None)
                 if not topic or not endpoint:
@@ -1116,9 +1118,9 @@ class URLabClient:
                 op="reset",
             )
         self._absorb_step_reply(reply)
-        return reply
+        return StepResult(reply)
 
-    def forward(self) -> Dict[str, Any]:
+    def forward(self) -> "StepResult":
         """Run ``mj_forward`` on the server (kinematics + dynamics, no
         integration) and return observations.
 
@@ -1131,7 +1133,7 @@ class URLabClient:
         """
         reply = self._rpc("forward", {}, expected_op="forward_ok")
         self._absorb_step_reply(reply)
-        return reply
+        return StepResult(reply)
 
 
     def _mirror_set_qpos_locally(self, reply: Mapping[str, Any]) -> None:
