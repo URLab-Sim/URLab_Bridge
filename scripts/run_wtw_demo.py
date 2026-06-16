@@ -120,11 +120,9 @@ def main() -> int:
     client.discover()
 
     if args.sim_dt > 0:
-        try:
-            client.set_sim_options(timestep=args.sim_dt)
+        applied = client.runtime.set_sim_options(timestep=args.sim_dt, required=False)
+        if applied is not None:
             logger.info("pushed sim timestep=%.4fs to UE", args.sim_dt)
-        except Exception as exc:
-            logger.warning("set_sim_options failed: %s -- using whatever UE compiled with", exc)
 
     arts = sorted(client.articulations.keys())
     logger.info("session=%s articulations=%s", client.session_id, arts)

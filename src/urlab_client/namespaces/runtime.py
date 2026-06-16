@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any, Dict, Optional, Sequence, TYPE_CHECKING, Union
 
 from .base import _RpcNamespace
 from ..enums import StepMode, coerce, wire
+from ..errors import URLabRPCError
 from .._op_helpers import target_payload
 from ..results import (
     ContactsResult,
@@ -35,6 +37,20 @@ from ..results import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
     from ..client import URLabClient
+
+logger = logging.getLogger(__name__)
+
+
+def _enum_int_from_suffix(enum_cls: Any, suffix: str) -> int:
+    """Map a wire suffix name (e.g. "rk4", "newton", "elliptic") back to its
+    MuJoCo enum int (mjtIntegrator/mjtCone/mjtSolver). Inverse of the
+    ``EnumName.split('_')[-1].lower()`` convention used on the wire."""
+    s = suffix.lower()
+    # MuJoCo enums are pybind11 types (not iterable); enumerate via __members__.
+    for name, member in enum_cls.__members__.items():
+        if name.split("_")[-1].lower() == s:
+            return int(member)
+    raise KeyError(f"{suffix!r} not a valid {enum_cls.__name__} suffix")
 
 
 class _RuntimeNamespace(_RpcNamespace):
@@ -177,11 +193,17 @@ class _RuntimeNamespace(_RpcNamespace):
         disableflags: Optional[int] = None,
         enableflags: Optional[int] = None,
         num_worker_threads: Optional[int] = None,
-    ) -> SimOptions:
+        required: bool = True,
+    ) -> Optional[SimOptions]:
         """Push MuJoCo sim options into the live UE model. MuJoCo-native
         SI units. Only fields you pass override; everything else keeps
         its compiled value. Mirrors back into client.model.opt so local
-        readers (decimation calc, etc.) see live UE state."""
+        readers (decimation calc, etc.) see live UE state.
+
+        ``required=False`` makes this best-effort: if the server rejects or
+        doesn't support the op, it logs a warning and returns ``None`` instead
+        of raising -- so callers can drop the ``try/except: pass`` boilerplate
+        and let UE fall back to the compiled options."""
         opts: Dict[str, Any] = {}
         if timestep          is not None: opts["timestep"]          = float(timestep)
         if gravity           is not None: opts["gravity"]           = [float(x) for x in gravity]
@@ -211,37 +233,120 @@ class _RuntimeNamespace(_RpcNamespace):
             raise ValueError("set_sim_options requires at least one field")
 
         client = self._client
-        reply = client._rpc(
-            "set_sim_options", {"options": opts},
-            expected_op="set_sim_options_ok",
-        )
+        try:
+            reply = client._rpc(
+                "set_sim_options", {"options": opts},
+                expected_op="set_sim_options_ok",
+            )
+        except URLabRPCError as exc:
+            if required:
+                raise
+            logger.warning(
+                "set_sim_options not applied (%s); UE keeps its compiled options",
+                exc,
+            )
+            return None
         result = dict(reply.get("options", {}))
 
         if client.model is not None:
             opt = client.model.opt
-            for key, attr in (
-                ("timestep",          "timestep"),
-                ("density",           "density"),
-                ("viscosity",         "viscosity"),
-                ("impratio",          "impratio"),
-                ("tolerance",         "tolerance"),
-                ("iterations",        "iterations"),
-                ("ls_iterations",     "ls_iterations"),
-                ("noslip_iterations", "noslip_iterations"),
-                ("noslip_tolerance",  "noslip_tolerance"),
-                ("ccd_iterations",    "ccd_iterations"),
-                ("ccd_tolerance",     "ccd_tolerance"),
-                ("sleep_tolerance",   "sleep_tolerance"),
+            # Float-typed opt fields. The server echoes numbers as floats; that
+            # is fine for these.
+            for key in (
+                "timestep", "density", "viscosity", "impratio", "tolerance",
+                "noslip_tolerance", "ccd_tolerance", "sleep_tolerance",
             ):
                 if key in opts and key in result:
-                    setattr(opt, attr, result[key])
+                    setattr(opt, key, float(result[key]))
+            # Int-typed opt fields. mjOption's pybind11 int setters REJECT a
+            # float (e.g. iterations=100.0), so coerce to int -- this was latent
+            # while only timestep was ever set and surfaced once we push the
+            # full option set.
+            for key in (
+                "iterations", "ls_iterations", "noslip_iterations", "ccd_iterations",
+            ):
+                if key in opts and key in result:
+                    setattr(opt, key, int(result[key]))
             for key, attr in (("gravity", "gravity"), ("wind", "wind"), ("magnetic", "magnetic")):
                 if key in opts and key in result:
                     vec = result[key]
                     for i, v in enumerate(vec):
                         opt.__getattribute__(attr)[i] = v
+            # Enum + flag fields the numeric loop can't handle. Without this,
+            # set_sim_options(integrator=..., solver=..., cone=..., *flags) only
+            # took effect on UE while the LOCAL model.opt kept its stale values,
+            # so puppet-mode mj_step silently used a different integrator/solver
+            # than UE. integrator/cone/solver arrive as suffix names ("rk4").
+            import mujoco
+            for key, enum_cls in (
+                ("integrator", mujoco.mjtIntegrator),
+                ("cone", mujoco.mjtCone),
+                ("solver", mujoco.mjtSolver),
+            ):
+                if key in opts and key in result:
+                    val = result[key]
+                    try:
+                        ival = (
+                            _enum_int_from_suffix(enum_cls, val)
+                            if isinstance(val, str)
+                            else int(val)
+                        )
+                        setattr(opt, key, enum_cls(ival))
+                    except (ValueError, KeyError) as exc:
+                        logger.debug("set_sim_options: cannot mirror %s=%r: %s", key, val, exc)
+            for key in ("enableflags", "disableflags"):
+                if key in opts and key in result:
+                    try:
+                        setattr(opt, key, int(result[key]))
+                    except (TypeError, ValueError):
+                        pass
 
         return _sim_options_from_wire(result)
+
+    def set_sim_options_from_model(
+        self, model: Any = None, *, required: bool = True
+    ) -> Optional[SimOptions]:
+        """Extract every sim option from a MuJoCo ``MjModel`` and push them all
+        to UE in one call -- the one-liner replacement for hand-writing the
+        timestep/gravity/integrator/cone/solver/... extraction at every call
+        site. Uses ``client.model`` when ``model`` is omitted. Does the
+        integrator/cone/solver enum->name conversion for you. ``required`` is
+        forwarded to :meth:`set_sim_options`."""
+        import mujoco
+
+        m = model if model is not None else self._client.model
+        if m is None:
+            raise ValueError(
+                "set_sim_options_from_model needs a model: pass one or set "
+                "client.model (constructed with local_model=True)"
+            )
+        o = m.opt
+
+        def _suffix(enum_cls: Any, val: Any) -> str:
+            return enum_cls(int(val)).name.split("_")[-1].lower()
+
+        return self.set_sim_options(
+            timestep=float(o.timestep),
+            gravity=[float(x) for x in o.gravity],
+            wind=[float(x) for x in o.wind],
+            magnetic=[float(x) for x in o.magnetic],
+            density=float(o.density),
+            viscosity=float(o.viscosity),
+            impratio=float(o.impratio),
+            tolerance=float(o.tolerance),
+            iterations=int(o.iterations),
+            ls_iterations=int(o.ls_iterations),
+            integrator=_suffix(mujoco.mjtIntegrator, o.integrator),
+            cone=_suffix(mujoco.mjtCone, o.cone),
+            solver=_suffix(mujoco.mjtSolver, o.solver),
+            noslip_iterations=int(o.noslip_iterations),
+            noslip_tolerance=float(o.noslip_tolerance),
+            ccd_iterations=int(o.ccd_iterations),
+            ccd_tolerance=float(o.ccd_tolerance),
+            disableflags=int(o.disableflags),
+            enableflags=int(o.enableflags),
+            required=required,
+        )
 
     def set_mode(self, mode: Union[str, StepMode]) -> StepMode:
         """Promote / demote the server's step mode. Camera frames stream over

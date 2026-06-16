@@ -21,6 +21,7 @@ import os
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -63,6 +64,25 @@ _OP_TIMEOUTS_S: Dict[str, float] = {
     "spawn_light": 30.0,
     "duplicate_actor": 30.0,
 }
+
+
+@dataclass
+class Readiness:
+    """Summary returned by :meth:`URLabClient.bringup` once the session is set
+    up and ready to drive."""
+    mode: "StepMode"
+    n_articulations: int
+    n_cameras: int = 0
+    cameras_ready: int = 0
+    sim_dt_applied: Optional[float] = None
+
+    def __str__(self) -> str:  # pragma: no cover - cosmetic
+        return (
+            f"Readiness(mode={self.mode}, articulations={self.n_articulations}, "
+            f"cameras_ready={self.cameras_ready}/{self.n_cameras}, "
+            f"sim_dt={self.sim_dt_applied})"
+        )
+
 
 # Optional at import-time so `from urlab_client import StepMode`
 # works in environments without msgpack / zmq / mujoco installed (the
@@ -192,6 +212,8 @@ class URLabClient:
         self._last_snapshot_monotonic: Optional[float] = None
         # Idempotency guard for close().
         self._closed: bool = False
+        # Wall-clock of the previous step(), for optional target_hz pacing.
+        self._last_step_monotonic: Optional[float] = None
         self._state_msg_count: int = 0
 
         # Guards writes through `self.data` + the mj_forward calls.
@@ -472,6 +494,7 @@ class URLabClient:
         camera_query: str = "latest",
         camera_timeout_s: float = 0.5,
         observations: Union[str, ObservationLevel] = "standard",
+        target_hz: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Advance the sim. Behaviour per `self.step_mode`:
 
@@ -509,6 +532,14 @@ class URLabClient:
         """
         obs_str = wire(coerce(ObservationLevel, observations))
 
+        # Optional real-time pacing: hold the loop to `target_hz` by sleeping
+        # off any time remaining since the previous step() -- absorbs the manual
+        # `sleep(dt - elapsed)` pattern from policy/demo loops.
+        if target_hz and target_hz > 0 and self._last_step_monotonic is not None:
+            slack = (1.0 / target_hz) - (time.monotonic() - self._last_step_monotonic)
+            if slack > 0:
+                time.sleep(slack)
+
         if self.step_mode == StepMode.PUPPET:
             reply = self._step_puppet(n_steps, observations=obs_str)
         else:
@@ -527,6 +558,7 @@ class URLabClient:
             self._attach_streamed_cameras(
                 reply, include_cameras, camera_query, camera_timeout_s
             )
+        self._last_step_monotonic = time.monotonic()
         return reply
 
     # -- camera access (decoupled getter API) -----------------------------
@@ -813,6 +845,78 @@ class URLabClient:
                 except Exception:  # pragma: no cover - progress is best-effort
                     pass
             time.sleep(poll_interval_s)
+
+    # -- bootstrap / lifecycle --------------------------------------------
+
+    def connect(self, observations: Union[str, ObservationLevel] = "standard") -> None:
+        """Open the session: handshake, load the model, build articulations.
+        Call once after construction. Same wire op as the legacy ``discover``;
+        ``connect`` is the canonical name."""
+        self.discover(observations=observations)
+
+    def refresh(self, observations: Union[str, ObservationLevel] = "standard") -> None:
+        """Re-run discovery to pick up scene changes (after spawn/import or an
+        external edit). Idempotent."""
+        self.discover(observations=observations)
+
+    def articulation(self, prefix: Optional[str] = None) -> "URLabArticulation":
+        """Return one articulation by ``prefix``, or the sole articulation when
+        ``prefix`` is None. Raises ``KeyError`` (listing available names) if the
+        prefix is unknown or the choice is ambiguous -- no more single-vs-multi
+        disambiguation boilerplate at the call site."""
+        if prefix is not None:
+            try:
+                return self.articulations[prefix]
+            except KeyError:
+                raise KeyError(
+                    f"no articulation {prefix!r}; available: {list(self.articulations)}"
+                ) from None
+        n = len(self.articulations)
+        if n == 1:
+            return next(iter(self.articulations.values()))
+        raise KeyError(
+            f"{n} articulations present; pass prefix=. "
+            f"available: {list(self.articulations)}"
+        )
+
+    def bringup(
+        self,
+        *,
+        mode: "Optional[Union[str, StepMode]]" = None,
+        cameras: bool = False,
+        sim_dt: Optional[float] = None,
+        start_pie: bool = False,
+        camera_timeout_s: float = 10.0,
+        observations: Union[str, ObservationLevel] = "standard",
+    ) -> Readiness:
+        """One call that leaves the session fully ready to drive.
+
+        Order: optional ``sim.start`` -> ``refresh`` (discover) ->
+        ``set_sim_options(timestep=sim_dt)`` (best-effort) -> ``set_mode(mode)``
+        -> ``warmup_cameras``. Returns a :class:`Readiness` summary. Raises on
+        the first stage that fails (e.g. :class:`URLabTimeoutError` if cameras
+        never stream), with details attached. Replaces the hand-ordered
+        connect/set_mode/refresh/warmup recipe."""
+        if start_pie and not self.manager_present:
+            self.sim.start()
+        self.refresh(observations=observations)
+        sim_dt_applied: Optional[float] = None
+        if sim_dt is not None:
+            applied = self.runtime.set_sim_options(timestep=float(sim_dt), required=False)
+            sim_dt_applied = getattr(applied, "timestep", None) if applied else None
+        if mode is not None:
+            self.runtime.set_mode(mode)
+        n_cams = len(self.camera_names())
+        cams_ready = 0
+        if cameras and n_cams:
+            cams_ready = len(self.warmup_cameras(timeout_s=camera_timeout_s))
+        return Readiness(
+            mode=self.step_mode,
+            n_articulations=len(self.articulations),
+            n_cameras=n_cams,
+            cameras_ready=cams_ready,
+            sim_dt_applied=sim_dt_applied,
+        )
 
     def _make_camera_callback(self, prefix: str, cam_name: str) -> "Callable[[bytes], None]":
         """Build a frame-bytes callback bound to a specific (prefix, cam)
