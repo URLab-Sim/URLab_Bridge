@@ -33,7 +33,7 @@ from .enums import (
     coerce,
     wire,
 )
-from .errors import URLabRPCError, URLabVersionMismatch
+from .errors import URLabRPCError, URLabTimeoutError, URLabVersionMismatch
 from .namespaces.debug import _DebugNamespace
 from .namespaces.outliner import _OutlinerNamespace
 from .namespaces.recording import URLabRecordingAPI
@@ -45,6 +45,24 @@ from .namespaces.sim import _SimNamespace
 from .transports import Transport, make_transport
 
 logger = logging.getLogger(__name__)
+
+# Per-op recv-timeout defaults (seconds), applied by ``_rpc`` when the caller
+# doesn't pass an explicit ``rcv_timeout_ms``. Long editor / PIE / handshake ops
+# get a generous window so callers never set a huge GLOBAL timeout just to make
+# one slow op survive. Ops not listed use the transport default (~5s).
+_OP_TIMEOUTS_S: Dict[str, float] = {
+    "hello": 30.0,          # handshake embeds the (possibly large) MJB
+    "begin_pie": 35.0,      # UE compile + PIE start
+    "stop_pie": 30.0,
+    "import_xml": 120.0,    # mesh clean subprocess + Blueprint compile
+    "create_level": 30.0,
+    "load_level": 30.0,
+    "save_level": 30.0,
+    "spawn_actor": 30.0,
+    "spawn_grid": 60.0,
+    "spawn_light": 30.0,
+    "duplicate_actor": 30.0,
+}
 
 # Optional at import-time so `from urlab_client import StepMode`
 # works in environments without msgpack / zmq / mujoco installed (the
@@ -169,6 +187,11 @@ class URLabClient:
         # Post-state frame_id of the most recent step() reply; get_camera(fresh=True)
         # waits for a streamed frame >= this so the image matches the step state.
         self._last_step_frame_id: Optional[int] = None
+        # Monotonic timestamp of the last state-stream snapshot; the liveness
+        # oracle (server_alive) reads it to tell "busy" from "dead" while awaiting.
+        self._last_snapshot_monotonic: Optional[float] = None
+        # Idempotency guard for close().
+        self._closed: bool = False
         self._state_msg_count: int = 0
 
         # Guards writes through `self.data` + the mj_forward calls.
@@ -189,9 +212,14 @@ class URLabClient:
         """Send one request and unpack one reply. Raises on error replies.
 
         ``rcv_timeout_ms`` overrides the transport's default recv
-        timeout for this single call. Use it for ops that block on
-        long-running UE work (e.g. ``begin_pie`` waiting for compile)
-        so the bridge doesn't give up before the server finishes."""
+        timeout for this single call. When omitted, a per-op default from
+        ``_OP_TIMEOUTS_S`` is applied so long editor/PIE ops get a generous
+        window automatically (no caller-guessed global timeout); ops not in
+        the registry use the transport default."""
+        if rcv_timeout_ms is None:
+            op_default_s = _OP_TIMEOUTS_S.get(op)
+            if op_default_s is not None:
+                rcv_timeout_ms = int(op_default_s * 1000)
         request = {"op": op, "session_id": self.session_id, **payload}
         reply = self._transport.rpc(request, rcv_timeout_ms=rcv_timeout_ms)
         if not isinstance(reply, dict):
@@ -539,29 +567,34 @@ class URLabClient:
         pixels immediately instead of ``None`` during stream warm-up.
 
         Returns the list of cameras that became ready. With ``require_all``
-        (default) a timeout raises ``TimeoutError`` naming the cameras that
-        never produced a frame -- a loud, debuggable signal instead of a
-        silent empty image.
+        (default) a timeout raises :class:`URLabTimeoutError` naming the cameras
+        that never produced a frame -- a loud, debuggable signal instead of a
+        silent empty image. (``URLabTimeoutError`` is also a ``TimeoutError``.)
         """
         self._start_streaming_subs()  # idempotent: (re)enable + subscribe
         target = list(names) if names is not None else self.camera_names()
         views = {n: self._find_camera_view(n) for n in target}
-        deadline = time.monotonic() + max(0.0, timeout_s)
-        ready: List[str] = []
-        while True:
+
+        def _poll() -> "Optional[List[str]]":
             ready = [n for n, v in views.items() if v.latest_frame is not None]
-            if len(ready) == len(target):
-                return ready
-            if time.monotonic() >= deadline:
+            return ready if len(ready) == len(target) else None
+
+        try:
+            return self.await_ready(
+                _poll, timeout_s=timeout_s,
+                description=f"camera warm-up ({len(target)} cameras)",
+                poll_interval_s=0.02,
+            )
+        except URLabTimeoutError:
+            ready = [n for n, v in views.items() if v.latest_frame is not None]
+            if require_all:
                 missing = [n for n in target if n not in ready]
-                if require_all:
-                    raise TimeoutError(
-                        f"camera warm-up timed out after {timeout_s}s; no frames "
-                        f"from: {missing}. Is PIE running and the scene lit? "
-                        f"(ready: {ready})"
-                    )
-                return ready
-            time.sleep(0.02)
+                raise URLabTimeoutError(
+                    f"camera warm-up: no frames from {missing} "
+                    f"(ready: {ready}). Is PIE running and the scene lit?",
+                    waited_s=timeout_s, server_alive=self.server_alive(),
+                )
+            return ready
 
     def get_camera(
         self,
@@ -716,7 +749,70 @@ class URLabClient:
         with self._state_lock:
             self._latest_state_snapshot = dict(snap)
             self._state_msg_count += 1
+            self._last_snapshot_monotonic = time.monotonic()
             self._state_cond.notify_all()
+
+    # -- readiness / await layer ------------------------------------------
+
+    def server_alive(self, within_s: float = 2.0) -> bool:
+        """True if a state-stream snapshot arrived within ``within_s`` seconds.
+
+        The state stream only flows while PIE is stepping, so this is the
+        liveness oracle for awaiting: during a step loop it distinguishes
+        "server busy" from "server hung". Returns False if no stream is up or
+        no snapshot has arrived yet (e.g. editor-time ops before PIE)."""
+        ts = self._last_snapshot_monotonic
+        return ts is not None and (time.monotonic() - ts) <= within_s
+
+    def await_ready(
+        self,
+        poll: "Callable[[], Any]",
+        *,
+        timeout_s: float,
+        description: str = "operation",
+        poll_interval_s: float = 0.05,
+        on_progress: "Optional[Callable[[str], None]]" = None,
+        require_liveness: bool = False,
+    ) -> Any:
+        """Block until ``poll()`` returns a non-None value, then return it.
+
+        The single readiness primitive every wait in the client builds on
+        (camera warm-up, PIE start, ...). ``poll`` is called every
+        ``poll_interval_s`` and should return ``None`` while pending or the
+        result once ready.
+
+        On timeout raises :class:`URLabTimeoutError`, whose ``server_alive``
+        field reports whether the state stream looked fresh -- so the error
+        says "alive but slow" vs "silent/hung". With ``require_liveness`` the
+        ``timeout_s`` deadline is soft *while the server is alive*: the wait is
+        extended in short grace windows (capped at 10x ``timeout_s``), so a
+        genuinely-working-but-slow server is waited out instead of failed.
+        ``on_progress`` (if given) is called ~once/second with an elapsed note.
+        """
+        start = time.monotonic()
+        deadline = start + max(0.0, timeout_s)
+        hard_deadline = start + max(0.0, timeout_s) * 10.0
+        last_beat = start
+        while True:
+            result = poll()
+            if result is not None:
+                return result
+            now = time.monotonic()
+            if now >= deadline:
+                alive = self.server_alive()
+                if require_liveness and alive and now < hard_deadline:
+                    deadline = now + min(max(timeout_s, 1.0), 5.0)
+                else:
+                    raise URLabTimeoutError(
+                        description, waited_s=now - start, server_alive=alive
+                    )
+            if on_progress is not None and (now - last_beat) >= 1.0:
+                last_beat = now
+                try:
+                    on_progress(f"{description}: {now - start:.0f}s elapsed")
+                except Exception:  # pragma: no cover - progress is best-effort
+                    pass
+            time.sleep(poll_interval_s)
 
     def _make_camera_callback(self, prefix: str, cam_name: str) -> "Callable[[bytes], None]":
         """Build a frame-bytes callback bound to a specific (prefix, cam)
@@ -999,6 +1095,11 @@ class URLabClient:
                 logger.debug("mj_forward after qpos mirror failed: %s", exc)
 
     def close(self) -> None:
+        # Idempotent: safe to call multiple times (context-manager exit + an
+        # explicit close, double-close in error paths, etc.) and never raises.
+        if self._closed:
+            return
+        self._closed = True
         # Revert URLab to live before tearing the transport down. If
         # the client used auto-promote to enter direct/puppet, the server
         # stays in that mode forever once we disconnect (publishers stay
@@ -1018,8 +1119,12 @@ class URLabClient:
                 logger.debug(
                     "URLabClient.close: revert to live failed: %s", exc
                 )
-        # Transport closes streaming subs and the RPC channel.
-        self._transport.close()
+        # Transport closes streaming subs and the RPC channel. Swallow so
+        # close() never raises during teardown / atexit.
+        try:
+            self._transport.close()
+        except Exception as exc:  # pragma: no cover - best-effort teardown
+            logger.debug("URLabClient.close: transport close failed: %s", exc)
 
     def __enter__(self) -> "URLabClient":
         return self
