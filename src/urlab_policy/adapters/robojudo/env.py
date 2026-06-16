@@ -577,7 +577,7 @@ if HAS_ROBOJUDO:
 
         # If set, reuse this URLabClient instead of constructing one — UE's
         # dispatcher tracks one active session, so a second client would
-        # expire the first. discover() and close() are skipped when set.
+        # expire the first. connect() and close() are skipped when set.
         existing_client: Any = None
 
     class G1URLabRoboJuDoEnvCfg(URLabRoboJuDoEnvCfg):

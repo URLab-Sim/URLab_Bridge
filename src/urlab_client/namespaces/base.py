@@ -54,7 +54,7 @@ class _RpcNamespace:
 
         raise AttributeError(
             f"{self._namespace!r} namespace has no op {name!r}; "
-            f"server hasn't advertised it (call discover() first), "
+            f"server hasn't advertised it (call connect() first), "
             f"and the namespace class has no hand-written method either"
         )
 

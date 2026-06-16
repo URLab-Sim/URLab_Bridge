@@ -44,7 +44,7 @@ except ImportError:  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
-# Dataclasses: per-kind accessors walked from MjModel at discover()
+# Dataclasses: per-kind accessors walked from MjModel at connect()
 # ---------------------------------------------------------------------------
 
 

@@ -36,7 +36,7 @@ Scene authoring:
 
 Errors:
 
-    URLabRPCError, URLabPIEError, URLabVersionMismatch
+    URLabRPCError, URLabPIEError, URLabVersionMismatch, URLabTimeoutError
 
 Enums:
 
@@ -47,7 +47,7 @@ Typed result objects:
 
     PIEState, PIEStartResult, PIEStatus, SimOptions, ActorInfo,
     BlueprintInfo, RecordingHandle, RecordingSummary, ReplaySession,
-    ReplayStatus
+    ReplayStatus, StepResult, CameraStreamInfo, Readiness
 """
 
 from .articulation import (
@@ -61,7 +61,7 @@ from .articulation import (
     URLabEntity,
     URLabPDController,
 )
-from .client import URLabClient
+from .client import Readiness, URLabClient
 from .enums import (
     ActuatorType,
     CameraMode,
@@ -74,7 +74,12 @@ from .enums import (
     SpaceMode,
     StepMode,
 )
-from .errors import URLabPIEError, URLabRPCError, URLabVersionMismatch
+from .errors import (
+    URLabPIEError,
+    URLabRPCError,
+    URLabTimeoutError,
+    URLabVersionMismatch,
+)
 from .namespaces.recording import URLabRecordingAPI
 from .namespaces.replay import URLabReplayAPI
 from .results import (
@@ -83,8 +88,10 @@ from .results import (
     ActorInfo,
     BlueprintInfo,
     CameraPose,
+    CameraStreamInfo,
     Contact,
     ContactsResult,
+    StepResult,
     KeyframeInfo,
     MocapPose,
     PIEStartResult,
@@ -108,6 +115,7 @@ from .scene_authoring import (
 __all__ = [
     # client + articulation
     "URLabClient",
+    "Readiness",
     "URLabArticulation",
     "URLabCameraView",
     "URLabController",
@@ -128,6 +136,7 @@ __all__ = [
     # errors
     "URLabPIEError",
     "URLabRPCError",
+    "URLabTimeoutError",
     "URLabVersionMismatch",
     # enums
     "ActuatorType",
@@ -146,8 +155,10 @@ __all__ = [
     "ActorInfo",
     "BlueprintInfo",
     "CameraPose",
+    "CameraStreamInfo",
     "Contact",
     "ContactsResult",
+    "StepResult",
     "KeyframeInfo",
     "MocapPose",
     "PIEStartResult",
