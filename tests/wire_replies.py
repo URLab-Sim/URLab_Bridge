@@ -59,6 +59,25 @@ def import_xml_ok(*, blueprint_class_path: str = "",
     }
 
 
+def op_started(*, job_id: str = "job_1", **extra: Any) -> Dict[str, Any]:
+    """Async editor-op kickoff reply: the op runs on a game-thread job and the
+    client polls op_status(job_id)."""
+    return {"op": "op_started", "job_id": job_id, "state": "running", **extra}
+
+
+def op_status_ok(*, job_id: str = "job_1", state: str = "running",
+                 result: Optional[Dict[str, Any]] = None,
+                 progress: Optional[str] = None, **extra: Any) -> Dict[str, Any]:
+    """op_status poll reply. ``state`` in {running, done, failed}; ``result`` is
+    the original op reply once terminal."""
+    out: Dict[str, Any] = {"op": "op_status_ok", "job_id": job_id, "state": state, **extra}
+    if progress is not None:
+        out["progress"] = progress
+    if result is not None:
+        out["result"] = result
+    return out
+
+
 def create_level_ok(*, level_path: str, **extra: Any) -> Dict[str, Any]:
     return {"op": "create_level_ok", "level_path": level_path, **extra}
 
@@ -117,10 +136,10 @@ def spawn_light_ok(*, actor_id: str = "",
     }
 
 
-def destroy_actor_ok(*, target: str = "",
+def remove_actor_ok(*, target: str = "",
                      requires_pie_restart: bool = False,
                      **extra: Any) -> Dict[str, Any]:
-    return {"op": "destroy_actor_ok", "target": target,
+    return {"op": "remove_actor_ok", "target": target,
             "requires_pie_restart": requires_pie_restart, **extra}
 
 

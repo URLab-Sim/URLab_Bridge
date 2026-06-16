@@ -217,9 +217,9 @@ def on_destroy_actor(_s=None, _a=None) -> None:
     if not aid:
         log("destroy_actor: actor_id empty", error=True); return
     try:
-        STATE.client.scene.destroy_actor(aid)
+        STATE.client.scene.remove_actor(aid)
         log(f"destroy_actor({aid!r}) -> ok")
-        _show_reply("destroy_actor", {"target": aid})
+        _show_reply("remove_actor", {"target": aid})
     except URLabRPCError as exc:
         log(f"destroy_actor failed [{exc.code}]: {exc.message}", error=True)
 
@@ -550,7 +550,7 @@ def on_outliner_destroy_selected(_s=None, _a=None) -> None:
         log("outliner: pick a row first", error=True); return
     target, by_name = _actor_target(sel)
     try:
-        STATE.client.scene.destroy_actor(target, by_name=by_name)
+        STATE.client.scene.remove_actor(target, by_name=by_name)
         log(f"destroy_actor({target!r}, by_name={by_name}) -> ok")
         _refresh_outliner_now()
     except URLabRPCError as exc:

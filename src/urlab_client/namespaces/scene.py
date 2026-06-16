@@ -72,7 +72,7 @@ class _SceneNamespace(_RpcNamespace):
         blueprint references it pulls in -- e.g. Marketplace mannequin
         AnimBPs that fail to compile and pop a modal during PIE start).
         """
-        self._client._rpc(
+        self._client._run_editor_job(
             "create_level",
             {"name": str(name), "force_overwrite": bool(force_overwrite)},
             expected_op="create_level_ok",
@@ -81,7 +81,7 @@ class _SceneNamespace(_RpcNamespace):
     def current_level(self) -> str:
         """Return the package path of the editor's currently-loaded
         level (e.g. ``/Game/Levels/MyLevel``). Editor-only."""
-        reply = self._client._rpc(
+        reply = self._client._run_editor_job(
             "current_level", {}, expected_op="current_level_ok",
         )
         return str(reply.get("level_path", ""))
@@ -93,7 +93,7 @@ class _SceneNamespace(_RpcNamespace):
         already absent. Switches the editor off it first if it's a UWorld
         currently loaded. Editor-only.
         """
-        reply = self._client._rpc(
+        reply = self._client._run_editor_job(
             "destroy_asset", {"asset_path": str(asset_path)},
             expected_op="destroy_asset_ok",
         )
@@ -105,7 +105,7 @@ class _SceneNamespace(_RpcNamespace):
         Heavier than :meth:`URLabClient.outliner.list_actors`.
         Returns from the PIE world if PIE is running, else the editor world.
         """
-        reply = self._client._rpc("snapshot", {}, expected_op="snapshot_ok")
+        reply = self._client._run_editor_job("snapshot", {}, expected_op="snapshot_ok")
         return _scene_snapshot_from_wire(reply)
 
     def duplicate_actor(
@@ -125,7 +125,7 @@ class _SceneNamespace(_RpcNamespace):
         }
         if location is not None:
             payload["location"] = [float(x) for x in location]
-        reply = self._client._rpc(
+        reply = self._client._run_editor_job(
             "duplicate_actor", payload, expected_op="duplicate_actor_ok"
         )
         return _editor_from_spawn_reply(reply)
@@ -135,7 +135,7 @@ class _SceneNamespace(_RpcNamespace):
     ) -> ActorHierarchyNode:
         """Return the recursive attachment tree rooted at ``target``."""
         payload = target_payload(target, by_name=by_name)
-        reply = self._client._rpc(
+        reply = self._client._run_editor_job(
             "actor_hierarchy", payload, expected_op="actor_hierarchy_ok"
         )
         return _hierarchy_from_wire(reply.get("root") or {})
@@ -147,21 +147,21 @@ class _SceneNamespace(_RpcNamespace):
         engine and begin_pie times out). Returns ``True`` if a manager
         was already present, ``False`` if one was spawned. Editor-only.
         """
-        reply = self._client._rpc(
+        reply = self._client._run_editor_job(
             "ensure_manager", {}, expected_op="ensure_manager_ok"
         )
         return bool(reply.get("was_existing", False))
 
     def load_level(self, name_or_path: str) -> None:
         """Load an existing level into the editor. Editor-only."""
-        self._client._rpc(
+        self._client._run_editor_job(
             "load_level", {"level_path": str(name_or_path)},
             expected_op="load_level_ok",
         )
 
     def save_level(self) -> None:
         """Save the editor's currently-loaded level. Editor-only."""
-        self._client._rpc("save_level", {}, expected_op="save_level_ok")
+        self._client._run_editor_job("save_level", {}, expected_op="save_level_ok")
 
     def import_xml(
         self, path: str, *, force_reimport: bool = False
@@ -179,7 +179,7 @@ class _SceneNamespace(_RpcNamespace):
         XML file stem), so old :class:`URLabBlueprint` handles remain
         valid after a re-import.
         """
-        reply = self._client._rpc(
+        reply = self._client._run_editor_job(
             "import_xml",
             {"path": str(path), "force_reimport": bool(force_reimport)},
             expected_op="import_xml_ok",
@@ -219,7 +219,7 @@ class _SceneNamespace(_RpcNamespace):
                 scale=scale,
             ),
         }
-        reply = self._client._rpc("spawn_actor", payload, expected_op="spawn_actor_ok")
+        reply = self._client._run_editor_job("spawn_actor", payload, expected_op="spawn_actor_ok")
         return _editor_from_spawn_reply(reply)
 
     def spawn_grid(
@@ -268,7 +268,7 @@ class _SceneNamespace(_RpcNamespace):
         elif rotation_euler is not None:
             payload["rotation_euler"] = [float(x) for x in rotation_euler]
 
-        reply = self._client._rpc(
+        reply = self._client._run_editor_job(
             "spawn_grid", payload, expected_op="spawn_grid_ok",
         )
         bp_class = str(reply.get("blueprint_class_path", "") or bp_str)
@@ -301,14 +301,14 @@ class _SceneNamespace(_RpcNamespace):
             "intensity": float(intensity),
             "color":     [float(x) for x in color],
         }
-        reply = self._client._rpc("spawn_light", payload, expected_op="spawn_light_ok")
+        reply = self._client._run_editor_job("spawn_light", payload, expected_op="spawn_light_ok")
         return _light_from_spawn_reply(reply)
 
-    def destroy_actor(self, target: str, *, by_name: bool = False) -> None:
+    def remove_actor(self, target: str, *, by_name: bool = False) -> None:
         """Destroy an actor by actor id (default) or actor name."""
-        self._client._rpc(
-            "destroy_actor", target_payload(target, by_name=by_name),
-            expected_op="destroy_actor_ok",
+        self._client._run_editor_job(
+            "remove_actor", target_payload(target, by_name=by_name),
+            expected_op="remove_actor_ok",
         )
 
     def set_actor_transform(
@@ -331,7 +331,7 @@ class _SceneNamespace(_RpcNamespace):
                 rotation_euler=rotation_euler if rotation_quat is None else None,
             ),
         }
-        self._client._rpc(
+        self._client._run_editor_job(
             "set_actor_transform", payload,
             expected_op="set_actor_transform_ok",
         )

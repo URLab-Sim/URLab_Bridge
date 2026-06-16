@@ -51,8 +51,13 @@ def on_connect(_s=None, _a=None) -> None:
     port = int(dpg.get_value("port_input") or STATE.step_port)
     mode_str = dpg.get_value("connect_mode_combo") or "auto"
     try:
+        # TEMP: bypass the exact-string MuJoCo version check + skip the
+        # cross-version MJB load so the dashboard connects to an editor built
+        # from a newer (e.g. main-HEAD 3.10.0) MuJoCo than the bridge venv
+        # pins (3.8.1). Remove once the version check is relaxed to a warning.
         STATE.client = URLabClient(host, step_mode=mode_str, step_port=port,
-                                    recv_timeout_ms=5000)
+                                    recv_timeout_ms=5000,
+                                    mujoco_version_check=False, local_model=False)
         STATE.client.connect()
         STATE.host, STATE.step_port = host, port
         log(f"connected to {host}:{port} session={STATE.client.session_id} "
@@ -188,6 +193,15 @@ def on_begin_pie(_s=None, _a=None) -> None:
         STATE.pie_state = reply.state.value
         compile_error = reply.compile_error or ""
         log(f"sim.start -> state={STATE.pie_state} compile_error={compile_error!r}")
+        # PIE just (re)built the scene: articulations + cameras came into being
+        # via the absorbed handshake (client.sim.start now also starts their
+        # streams). Refresh the UI so the camera/runtime tabs pick them up.
+        if reply.is_ready:
+            tab_runtime.refresh_articulations_dropdown()
+            tab_runtime.refresh_articulation_info()
+            tab_policy.refresh_articulations()
+            tab_cameras.ensure_textures()
+            STATE.render_request = True
     except URLabRPCError as exc:
         log(f"sim.start failed [{exc.code}]: {exc.message}", error=True)
 

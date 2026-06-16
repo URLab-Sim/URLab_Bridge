@@ -260,6 +260,69 @@ class URLabClient:
             )
         return dict(reply)
 
+    def _run_editor_job(
+        self,
+        op: str,
+        payload: Mapping[str, Any],
+        *,
+        expected_op: str,
+        on_progress: "Optional[Callable[[str], None]]" = None,
+        timeout_s: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Run a (possibly async) editor op and return its final reply dict.
+
+        The server may answer EITHER synchronously (``op == expected_op`` --
+        older/non-async ops) OR asynchronously with ``op == "op_started"`` +
+        ``job_id``, in which case we poll ``op_status`` via :meth:`await_ready`
+        until the job is done/failed. Either way the caller gets the same final
+        reply dict, so the public method signatures are unchanged."""
+        reply = self._rpc(op, payload)
+        if reply.get("op") != "op_started":
+            # Synchronous reply (or non-async server): validate and return.
+            if reply.get("op") != expected_op:
+                raise URLabRPCError(
+                    "unexpected_reply_op",
+                    f"wanted {expected_op!r}, got {reply.get('op')!r}",
+                    op=op,
+                )
+            return reply
+
+        job_id = reply.get("job_id")
+        if not job_id:
+            raise URLabRPCError("bad_job", "op_started reply missing job_id", op=op)
+        tmo = timeout_s if timeout_s is not None else _OP_TIMEOUTS_S.get(op, 30.0)
+
+        def _poll() -> "Optional[Dict[str, Any]]":
+            st = self._rpc("op_status", {"job_id": job_id})
+            if st.get("state") == "running":
+                prog = st.get("progress")
+                if prog and on_progress is not None:
+                    try:
+                        on_progress(prog)
+                    except Exception:  # pragma: no cover - progress best-effort
+                        pass
+                return None
+            return st  # done | failed
+
+        final = self.await_ready(
+            _poll, timeout_s=tmo, description=op,
+            poll_interval_s=0.1, on_progress=on_progress, require_liveness=True,
+        )
+        result = final.get("result") or {}
+        if final.get("state") == "failed":
+            raise URLabRPCError(
+                result.get("code", "job_failed"),
+                result.get("message", f"editor job {op!r} failed"),
+                op=op,
+            )
+        if result.get("op") != expected_op:
+            raise URLabRPCError(
+                "unexpected_reply_op",
+                f"wanted {expected_op!r}, got {result.get('op')!r}",
+                op=op,
+            )
+        return result
+
     def _rpc_configure_controller(
         self, *, articulation: str, params: Mapping[str, Any]
     ) -> Dict[str, Any]:

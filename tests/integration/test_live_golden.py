@@ -115,7 +115,7 @@ def test_wire_smoke(golden_session):
     finally:
         # Always destroy the duplicate so subsequent tests see a clean scene.
         try:
-            client.scene.destroy_actor("golden_root_dup")
+            client.scene.remove_actor("golden_root_dup")
         except URLabRPCError:
             pass
 
