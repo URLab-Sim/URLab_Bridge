@@ -173,8 +173,9 @@ class URLabCameraView:
     sim_time: Optional[float] = None
     frame_count: int = 0
     # Post-step render-snapshot id of `latest_frame` (the step state it shows).
-    # Set from the step reply's per-camera `frame_id` (decoupled streaming /
-    # frame-id association). None until the first id-tagged frame arrives.
+    # Set from the SHM/ZMQ stream's per-frame metadata header, together with
+    # `latest_frame` so the two never diverge. A "fresh" step query waits until
+    # this is >= the step reply's frame_id. None until the first frame arrives.
     frame_id: Optional[int] = None
 
     @classmethod

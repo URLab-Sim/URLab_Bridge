@@ -21,7 +21,7 @@ import threading
 from typing import Any, Dict, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
-from . import FrameCallback, SnapshotCallback, Transport
+from . import FrameCallback, SnapshotCallback, Transport, parse_camera_frame
 
 logger = logging.getLogger(__name__)
 
@@ -260,14 +260,15 @@ class ZmqTransport(Transport):
             stop_ev = self._cam_stops[key]
             while not stop_ev.is_set():
                 try:
-                    sock.recv()       # topic frame, discard
-                    pixels = sock.recv()
+                    sock.recv()         # topic frame, discard
+                    payload = sock.recv()  # [meta(32)][pixels]
                 except zmq.Again:
                     continue
                 except Exception:
                     break
+                pixels, frame_id, sim_time = parse_camera_frame(payload)
                 try:
-                    on_frame(pixels)
+                    on_frame(pixels, frame_id, sim_time)
                 except Exception as exc:  # pragma: no cover - callback-defensive
                     logger.debug("camera frame callback raised: %s", exc)
         finally:
