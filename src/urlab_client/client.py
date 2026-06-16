@@ -177,7 +177,7 @@ class URLabClient:
         # xfrc is tracked separately on each URLabArticulation.
         self._pending_entity_xfrc: Dict[str, np.ndarray] = {}
 
-        # transport="shm" defers actual SHM construction to discover()
+        # transport="shm" defers actual SHM construction to connect()
         # so we can pull the session dir out of the handshake; until then
         # we use ZMQ for the hello round-trip.
         self._shm_dir_override: Optional[str] = shm_dir
@@ -322,7 +322,7 @@ class URLabClient:
         except URLabRPCError as exc:
             if exc.code in ("unknown_op", "missing_op"):
                 logger.debug(
-                    "discover(): server has no `meta` op; namespace "
+                    "connect(): server has no `meta` op; namespace "
                     "synthesis disabled, hand-written wrappers still work"
                 )
                 self._ops_meta = {}
@@ -336,7 +336,7 @@ class URLabClient:
         # begin_pie's embedded handshake when PIE comes up.
         if not self.manager_present:
             logger.info(
-                "discover(): no manager registered (editor-time / pre-PIE). "
+                "connect(): no manager registered (editor-time / pre-PIE). "
                 "Editor-only ops are available; call begin_pie or wait for "
                 "the user to hit Play before stepping."
             )
@@ -375,7 +375,7 @@ class URLabClient:
         self._start_streaming_subs()
 
     def _apply_handshake(self, reply: Mapping[str, Any]) -> None:
-        """Shared entry point used by `discover()` and tests that inject
+        """Shared entry point used by `connect()` and tests that inject
         a canned handshake without the socket round-trip."""
         # Hold _data_lock around model/data swap so a concurrent reader
         # (state-stream worker, future async caller) can't see a
@@ -725,7 +725,7 @@ class URLabClient:
 
     def _start_streaming_subs(self) -> None:
         """Spin up the state-snapshot stream + one camera stream per
-        registered camera. Idempotent. Called from discover() when
+        registered camera. Idempotent. Called from connect() when
         live is active and from set_mode() on transitions back
         to live.
         """

@@ -85,7 +85,7 @@ class _SimNamespace(_RpcNamespace):
             except Exception as exc:
                 logger.warning(
                     "sim.start: handshake absorption failed: %s -- "
-                    "client.model may be stale; call discover() to refresh",
+                    "client.model may be stale; call client.refresh() to refresh",
                     exc,
                 )
         result = PIEStartResult(
