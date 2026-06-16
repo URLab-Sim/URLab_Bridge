@@ -36,7 +36,7 @@ def _make_client(port: int, *, step_mode: str = "direct") -> URLabClient:
         f"tcp://127.0.0.1",
         step_mode=step_mode,
         step_port=port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
 
@@ -45,7 +45,7 @@ def test_hello_round_trip(mock_step_server, base_handshake):
     mock_step_server.replies.append(base_handshake)
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
     finally:
         client.close()
     assert client.session_id == base_handshake["session_id"]
@@ -67,7 +67,7 @@ def test_error_reply_raises_rpcerror(mock_step_server):
     client = _make_client(mock_step_server.port)
     try:
         with pytest.raises(URLabRPCError) as excinfo:
-            client.discover()
+            client.connect()
         assert excinfo.value.code == "version_mismatch"
     finally:
         client.close()
@@ -87,7 +87,7 @@ def test_direct_step_sends_ctrl_and_absorbs_reply(mock_step_server, base_handsha
     ))
     client = _make_client(mock_step_server.port, step_mode="direct")
     try:
-        client.discover()
+        client.connect()
         client.articulations["vx300s"].set_ctrl({"waist": 0.5})
         reply = client.step(n_steps=5)
     finally:
@@ -131,7 +131,7 @@ def test_twist_and_clocks_roundtrip(mock_step_server, base_handshake):
     ))
     client = _make_client(mock_step_server.port, step_mode="direct")
     try:
-        client.discover()
+        client.connect()
         client.step(n_steps=1)
     finally:
         client.close()
@@ -166,7 +166,7 @@ def test_clocks_default_zero_before_first_reply(mock_step_server, base_handshake
     mock_step_server.replies.append(base_handshake)
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
     finally:
         client.close()
     # base_handshake doesn't include clock blocks -> zeros after discover.
@@ -181,7 +181,7 @@ def test_reset_round_trip(mock_step_server, base_handshake):
     mock_step_server.replies.append(wr.step_ok())
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.reset(keyframe_name="home", seed=42)
     finally:
         client.close()
@@ -198,7 +198,7 @@ def test_set_mode_rpc(mock_step_server, base_handshake):
     ))
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         current = client.runtime.set_mode("puppet")
     finally:
         client.close()
@@ -221,7 +221,7 @@ def test_configure_controller_rpc(mock_step_server, base_handshake):
     ))
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         result = client.articulations["vx300s"].controller.set_gains(
             kp={"waist": 320.0}
         )
@@ -252,7 +252,7 @@ def test_recording_start_stop_save(mock_step_server, base_handshake):
     ])
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         handle = client.recording.start()
         assert isinstance(handle, RecordingHandle)
         assert handle.name == "ep_1"
@@ -282,7 +282,7 @@ def test_replay_play_shortcut(mock_step_server, base_handshake):
     ])
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         session = client.replay.play("C:/tmp/ep_1.json")
     finally:
         client.close()
@@ -303,7 +303,7 @@ def test_puppet_step_n_steps_calls_mj_step(
     ])
     client = _make_client(mock_step_server.port, step_mode="puppet")
     try:
-        client.discover()
+        client.connect()
         # Drive a non-trivial state so mj_step has something to integrate
         client.data.qvel[:] = 0.5
         t0 = client.data.time
@@ -329,7 +329,7 @@ def test_puppet_step_zero_does_not_call_mj_step(
     ])
     client = _make_client(mock_step_server.port, step_mode="puppet")
     try:
-        client.discover()
+        client.connect()
         # Set a recognisable state and confirm it survives (mj_step would integrate)
         client.data.qpos[0] = 1.234
         t_before = client.data.time
@@ -358,7 +358,7 @@ def test_step_reply_mirrors_state_into_local_mjdata_direct_mode(
     ])
     client = _make_client(mock_step_server.port, step_mode="direct")
     try:
-        client.discover()
+        client.connect()
         client.step(n_steps=1)
         # The local mirror should now hold the UE-authoritative qpos for
         # each articulation's joints at their qpos_offset.
@@ -389,7 +389,7 @@ def test_set_sim_options_returns_typed_simoptions(mock_step_server, base_handsha
     ])
     client = _make_client(mock_step_server.port, step_mode="direct")
     try:
-        client.discover()
+        client.connect()
         result = client.runtime.set_sim_options(timestep=0.002)
         assert isinstance(result, SimOptions)
         assert result.timestep == pytest.approx(0.002)
@@ -410,7 +410,7 @@ def test_set_sim_options_rejects_empty_call(mock_step_server, base_handshake):
     mock_step_server.replies.append(base_handshake)
     client = _make_client(mock_step_server.port, step_mode="direct")
     try:
-        client.discover()
+        client.connect()
         with pytest.raises(ValueError, match="at least one field"):
             client.runtime.set_sim_options()
     finally:

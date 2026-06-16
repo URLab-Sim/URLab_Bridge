@@ -36,10 +36,10 @@ def _make_discovered_client(port: int, mock_server, base_handshake) -> URLabClie
         "tcp://127.0.0.1",
         step_mode="direct",
         step_port=port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
-    client.discover()
+    client.connect()
     return client
 
 

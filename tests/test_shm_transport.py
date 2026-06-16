@@ -333,7 +333,7 @@ def test_rpc_falls_back_when_files_missing(msgpack_mod, tmp_path):
         def __init__(self):
             self.sent = []
 
-        def rpc(self, req, *, rcv_timeout_ms=None):
+        def rpc(self, req, *, recv_timeout_ms=None):
             self.sent.append(dict(req))
             return {"op": "fallback_ok"}
 
@@ -481,7 +481,7 @@ def test_rpc_timeout_when_server_silent(msgpack_mod, tmp_path):
 
 
 def test_rpc_per_call_timeout_overrides_default(msgpack_mod, tmp_path):
-    """ShmTransport.rpc(rcv_timeout_ms=...) overrides the constructor
+    """ShmTransport.rpc(recv_timeout_ms=...) overrides the constructor
     default for that single call. Constructor default is very long
     (5s); the per-call override caps to 200ms; verify the call raises
     TimeoutError around 200ms, not 5s."""
@@ -499,7 +499,7 @@ def test_rpc_per_call_timeout_overrides_default(msgpack_mod, tmp_path):
         try:
             t0 = time.monotonic()
             with pytest.raises(TimeoutError):
-                transport.rpc({"op": "hello"}, rcv_timeout_ms=200)
+                transport.rpc({"op": "hello"}, recv_timeout_ms=200)
             elapsed = time.monotonic() - t0
             # Per-call override fires; full-budget (~5s) was bypassed.
             assert elapsed < 1.0, (

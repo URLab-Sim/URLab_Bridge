@@ -45,12 +45,12 @@ class ZmqTransport(Transport):
         *,
         step_port: int = 5559,
         state_port: int = 5555,
-        rcv_timeout_ms: int = 5000,
+        recv_timeout_ms: int = 5000,
     ):
         self.address = address
         self.step_port = step_port
         self.state_port = state_port
-        self._rcv_timeout_ms = rcv_timeout_ms
+        self._recv_timeout_ms = recv_timeout_ms
 
         self._ctx: Any = None
         self._socket: Any = None
@@ -82,7 +82,7 @@ class ZmqTransport(Transport):
         if self._ctx is None:
             self._ctx = zmq.Context()
         self._socket = self._ctx.socket(zmq.REQ)
-        self._socket.setsockopt(zmq.RCVTIMEO, self._rcv_timeout_ms)
+        self._socket.setsockopt(zmq.RCVTIMEO, self._recv_timeout_ms)
         self._socket.setsockopt(zmq.LINGER, 0)
         endpoint = f"{self.address}:{self.step_port}"
         self._socket.connect(endpoint)
@@ -105,9 +105,9 @@ class ZmqTransport(Transport):
         self,
         request: Mapping[str, Any],
         *,
-        rcv_timeout_ms: Optional[int] = None,
+        recv_timeout_ms: Optional[int] = None,
     ) -> Mapping[str, Any]:
-        """One-shot send + recv. Pass ``rcv_timeout_ms`` for ops that
+        """One-shot send + recv. Pass ``recv_timeout_ms`` for ops that
         legitimately take longer than the constructor default (e.g.
         ``begin_pie`` blocks on UE compile, can be 30s+). The override
         is applied for this call only; the next call goes back to the
@@ -120,14 +120,14 @@ class ZmqTransport(Transport):
         with self._sock_lock:
             self._ensure_socket()
             try:
-                if rcv_timeout_ms is not None:
-                    self._socket.setsockopt(zmq.RCVTIMEO, int(rcv_timeout_ms))
+                if recv_timeout_ms is not None:
+                    self._socket.setsockopt(zmq.RCVTIMEO, int(recv_timeout_ms))
                 try:
                     self._socket.send(msgpack.packb(dict(request), use_bin_type=True))
                     raw = self._socket.recv()
                 finally:
-                    if rcv_timeout_ms is not None and self._socket is not None:
-                        self._socket.setsockopt(zmq.RCVTIMEO, self._rcv_timeout_ms)
+                    if recv_timeout_ms is not None and self._socket is not None:
+                        self._socket.setsockopt(zmq.RCVTIMEO, self._recv_timeout_ms)
             except Exception:
                 # A REQ socket is unusable after send/recv error; reset so the
                 # next call gets a clean retry.

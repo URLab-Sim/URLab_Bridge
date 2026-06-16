@@ -33,7 +33,7 @@ def _client(port: int) -> URLabClient:
         "tcp://127.0.0.1",
         step_mode="direct",
         step_port=port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
 
@@ -83,7 +83,7 @@ def test_minimal_absorbs_qpos_qvel(mock_step_server, base_handshake):
     mock_step_server.replies.extend([base_handshake, _minimal_reply()])
     client = _client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.step(observations="minimal")
         arm = client.articulations["vx300s"]
         np.testing.assert_allclose(arm.qpos_array, [0.1, 0.2])
@@ -96,7 +96,7 @@ def test_standard_absorbs_act_and_sensors(mock_step_server, base_handshake):
     mock_step_server.replies.extend([base_handshake, _standard_reply()])
     client = _client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.step(observations="standard")
         arm = client.articulations["vx300s"]
         np.testing.assert_allclose(arm.act_array, [0.42, 0.0])
@@ -112,7 +112,7 @@ def test_full_absorbs_bodies_and_forces(mock_step_server, base_handshake):
     mock_step_server.replies.extend([base_handshake, _full_reply()])
     client = _client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.step(observations="full")
         arm = client.articulations["vx300s"]
         body = arm.bodies.get("vx300s_base_link")
@@ -137,7 +137,7 @@ def test_actuator_forces_dict_form(mock_step_server, base_handshake):
     mock_step_server.replies.extend([base_handshake, reply])
     client = _client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.step(observations="full")
         arm = client.articulations["vx300s"]
         if "waist" in arm.actuators:
@@ -152,7 +152,7 @@ def test_observation_level_passes_through_on_wire(mock_step_server, base_handsha
     mock_step_server.replies.extend([base_handshake, _minimal_reply()])
     client = _client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.step(observations="full")
         req = mock_step_server.received[-1]
         assert req["observations"] == "full"

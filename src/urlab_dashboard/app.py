@@ -52,8 +52,8 @@ def on_connect(_s=None, _a=None) -> None:
     mode_str = dpg.get_value("connect_mode_combo") or "auto"
     try:
         STATE.client = URLabClient(host, step_mode=mode_str, step_port=port,
-                                    rcv_timeout_ms=5000)
-        STATE.client.discover()
+                                    recv_timeout_ms=5000)
+        STATE.client.connect()
         STATE.host, STATE.step_port = host, port
         log(f"connected to {host}:{port} session={STATE.client.session_id} "
             f"mode={STATE.client.step_mode.value} "

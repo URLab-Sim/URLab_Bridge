@@ -159,17 +159,17 @@ def test_close_reverts_to_live(pie_client):
     has nothing to revert from.
     """
     c1 = URLabClient(
-        HOST, step_mode=StepMode.DIRECT, step_port=STEP_PORT, rcv_timeout_ms=2000
+        HOST, step_mode=StepMode.DIRECT, step_port=STEP_PORT, recv_timeout_ms=2000
     )
-    c1.discover()
+    c1.connect()
     assert c1.step_mode == StepMode.DIRECT
     c1.close()
 
     c2 = URLabClient(
-        HOST, step_mode=StepMode.AUTO, step_port=STEP_PORT, rcv_timeout_ms=2000
+        HOST, step_mode=StepMode.AUTO, step_port=STEP_PORT, recv_timeout_ms=2000
     )
     try:
-        c2.discover()
+        c2.connect()
         current = c2.runtime.set_mode(StepMode.LIVE)
         assert current == StepMode.LIVE
     finally:

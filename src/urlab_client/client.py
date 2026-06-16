@@ -49,7 +49,7 @@ from .transports import Transport, make_transport
 logger = logging.getLogger(__name__)
 
 # Per-op recv-timeout defaults (seconds), applied by ``_rpc`` when the caller
-# doesn't pass an explicit ``rcv_timeout_ms``. Long editor / PIE / handshake ops
+# doesn't pass an explicit ``recv_timeout_ms``. Long editor / PIE / handshake ops
 # get a generous window so callers never set a huge GLOBAL timeout just to make
 # one slow op survive. Ops not listed use the transport default (~5s).
 _OP_TIMEOUTS_S: Dict[str, float] = {
@@ -118,7 +118,7 @@ class URLabClient:
         info_port: int = 5557,
         mujoco_version_check: bool = True,
         local_model: bool = True,
-        rcv_timeout_ms: int = 5000,
+        recv_timeout_ms: int = 5000,
         auto_promote_step_mode: bool = True,
         transport: Union[str, Transport] = "zmq",
         shm_dir: Optional[str] = None,
@@ -131,7 +131,7 @@ class URLabClient:
         self.info_port = info_port
         self.mujoco_version_check = mujoco_version_check
         self.local_model = local_model
-        self._rcv_timeout_ms = rcv_timeout_ms
+        self._recv_timeout_ms = recv_timeout_ms
         self._auto_promote_step_mode = auto_promote_step_mode
 
         self.session_id: Optional[str] = None
@@ -189,7 +189,7 @@ class URLabClient:
                     address,
                     step_port=step_port,
                     state_port=state_port,
-                    rcv_timeout_ms=rcv_timeout_ms,
+                    recv_timeout_ms=recv_timeout_ms,
                 )
                 self._pending_shm_swap = (transport == "shm")
             else:
@@ -230,21 +230,21 @@ class URLabClient:
         payload: Mapping[str, Any],
         *,
         expected_op: Optional[str] = None,
-        rcv_timeout_ms: Optional[int] = None,
+        recv_timeout_ms: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Send one request and unpack one reply. Raises on error replies.
 
-        ``rcv_timeout_ms`` overrides the transport's default recv
+        ``recv_timeout_ms`` overrides the transport's default recv
         timeout for this single call. When omitted, a per-op default from
         ``_OP_TIMEOUTS_S`` is applied so long editor/PIE ops get a generous
         window automatically (no caller-guessed global timeout); ops not in
         the registry use the transport default."""
-        if rcv_timeout_ms is None:
+        if recv_timeout_ms is None:
             op_default_s = _OP_TIMEOUTS_S.get(op)
             if op_default_s is not None:
-                rcv_timeout_ms = int(op_default_s * 1000)
+                recv_timeout_ms = int(op_default_s * 1000)
         request = {"op": op, "session_id": self.session_id, **payload}
-        reply = self._transport.rpc(request, rcv_timeout_ms=rcv_timeout_ms)
+        reply = self._transport.rpc(request, recv_timeout_ms=recv_timeout_ms)
         if not isinstance(reply, dict):
             raise RuntimeError(f"non-dict reply to {op!r}: {type(reply).__name__}")
         reply_op = reply.get("op")
@@ -271,7 +271,7 @@ class URLabClient:
 
     # -- session lifecycle ------------------------------------------------
 
-    def discover(self, observations: Union[str, ObservationLevel] = "standard") -> None:
+    def connect(self, observations: Union[str, ObservationLevel] = "standard") -> None:
         """Handshake: send `hello`, load the MJB, construct articulation
         wrappers. Raises on a version mismatch unless
         `mujoco_version_check=False` was set.
@@ -850,16 +850,10 @@ class URLabClient:
 
     # -- bootstrap / lifecycle --------------------------------------------
 
-    def connect(self, observations: Union[str, ObservationLevel] = "standard") -> None:
-        """Open the session: handshake, load the model, build articulations.
-        Call once after construction. Same wire op as the legacy ``discover``;
-        ``connect`` is the canonical name."""
-        self.discover(observations=observations)
-
     def refresh(self, observations: Union[str, ObservationLevel] = "standard") -> None:
-        """Re-run discovery to pick up scene changes (after spawn/import or an
-        external edit). Idempotent."""
-        self.discover(observations=observations)
+        """Re-run the handshake to pick up scene changes (after spawn/import or
+        an external edit). Idempotent; same wire op as :meth:`connect`."""
+        self.connect(observations=observations)
 
     def articulation(self, prefix: Optional[str] = None) -> "URLabArticulation":
         """Return one articulation by ``prefix``, or the sole articulation when

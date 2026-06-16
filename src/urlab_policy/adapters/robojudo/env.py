@@ -673,7 +673,7 @@ if HAS_ROBOJUDO:
                     "URLabRoboJuDoEnv: connecting to %s (step_mode=%s, transport=%s)",
                     cfg_env.address, cfg_env.step_mode, cfg_env.transport,
                 )
-                self.client.discover(observations=cfg_env.observation_level)
+                self.client.connect(observations=cfg_env.observation_level)
 
             try:
                 self.client.runtime.set_sim_options(timestep=cfg_env.sim_dt)
@@ -1057,7 +1057,7 @@ class URLabEnv:
 
         if not client.articulations:
             raise RuntimeError(
-                "URLabClient has no articulations; call client.discover() first"
+                "URLabClient has no articulations; call client.connect() first"
             )
 
         self.action_space = self._build_action_space()

@@ -129,7 +129,7 @@ def _make_client(transport: str, address: str, shm_dir: str, mode: str,
         )
     else:
         raise ValueError(f"unknown transport {transport!r}")
-    client.discover()
+    client.connect()
     return client
 
 

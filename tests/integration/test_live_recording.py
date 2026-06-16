@@ -54,7 +54,7 @@ def test_recording_lifecycle(pie_client, tmp_path):
     assert isinstance(saved, Path)
     assert saved.exists()
 
-    pie_client.recording.clear()
+    pie_client.recording.clear_buffer()
 
 
 def test_replay_lifecycle(pie_client, tmp_path):
@@ -64,7 +64,7 @@ def test_replay_lifecycle(pie_client, tmp_path):
         pie_client.step(n_steps=1)
     pie_client.recording.stop()
     saved = pie_client.recording.save()
-    pie_client.recording.clear()
+    pie_client.recording.clear_buffer()
 
     session = pie_client.replay.load(str(saved))
     assert isinstance(session, ReplaySession)

@@ -1344,7 +1344,7 @@ class MjlabRunner:
         from urlab_policy.adapters.mjlab import MjlabRunner
 
         client = URLabClient("tcp://localhost", step_mode=StepMode.DIRECT)
-        client.discover()
+        client.connect()
 
         runner = MjlabRunner(
             client,

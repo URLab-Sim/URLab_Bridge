@@ -31,7 +31,7 @@ def _make_client(port: int) -> URLabClient:
         "tcp://127.0.0.1",
         step_mode="auto",
         step_port=port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
 
@@ -51,7 +51,7 @@ def test_discover_fetches_meta_and_populates_ops(mock_step_server, base_handshak
     })
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
     finally:
         client.close()
 
@@ -74,7 +74,7 @@ def test_discover_tolerates_missing_meta(mock_step_server, base_handshake):
     })
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
     finally:
         client.close()
     assert client._ops_meta == {}
@@ -97,7 +97,7 @@ def test_namespace_synthesizes_unknown_op(mock_step_server, base_handshake):
 
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         result = client.scene.future_scene_op(some_arg="hi", n=7)
     finally:
         client.close()
@@ -128,7 +128,7 @@ def test_namespace_proxies_to_handwritten_method(mock_step_server, base_handshak
 
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.scene.import_xml("/tmp/whatever.xml")
     finally:
         client.close()
@@ -153,7 +153,7 @@ def test_namespace_raises_for_op_in_other_namespace(mock_step_server, base_hands
     })
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         with pytest.raises(AttributeError):
             client.scene.step
     finally:
@@ -178,7 +178,7 @@ def test_sim_namespace_renames_pie_jargon(mock_step_server, base_handshake):
 
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         result_start = client.sim.start(raise_on_failure=False)
         client.sim.stop()
         result_status = client.sim.status()
@@ -206,7 +206,7 @@ def test_namespace_dir_lists_namespace_ops_only(mock_step_server, base_handshake
     })
     client = _make_client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         scene_attrs = dir(client.scene)
     finally:
         client.close()

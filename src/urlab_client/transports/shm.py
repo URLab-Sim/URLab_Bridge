@@ -270,7 +270,7 @@ class ShmTransport(Transport):
         self,
         request: Mapping[str, Any],
         *,
-        rcv_timeout_ms: Optional[int] = None,
+        recv_timeout_ms: Optional[int] = None,
     ) -> Mapping[str, Any]:
         if msgpack is None:
             raise RuntimeError("msgpack not installed; cannot run SHM RPC")
@@ -280,14 +280,14 @@ class ShmTransport(Transport):
         # caller transparently gets a real reply.
         op = request.get("op")
         if op in self._ops_routed_to_fallback and self._fallback is not None:
-            return self._fallback.rpc(request, rcv_timeout_ms=rcv_timeout_ms)
+            return self._fallback.rpc(request, recv_timeout_ms=recv_timeout_ms)
 
         with self._rpc_lock:
             if not self._ensure_rpc_open():
                 if self._fallback is not None:
                     logger.debug("ShmTransport: req/rep.shm not ready, "
                                  "falling back for op=%r", op)
-                    return self._fallback.rpc(request, rcv_timeout_ms=rcv_timeout_ms)
+                    return self._fallback.rpc(request, recv_timeout_ms=recv_timeout_ms)
                 raise RuntimeError(
                     "ShmTransport.rpc: req.shm/rep.shm not available at "
                     f"{self.shm_dir} after {self._open_timeout_s}s"
@@ -302,7 +302,7 @@ class ShmTransport(Transport):
                 # Too large for SHM; route through the ZMQ fallback (same
                 # path reply-too-large uses) instead of raising directly.
                 if self._fallback is not None:
-                    return self._fallback.rpc(request, rcv_timeout_ms=rcv_timeout_ms)
+                    return self._fallback.rpc(request, recv_timeout_ms=recv_timeout_ms)
                 raise RuntimeError(
                     f"SHM request payload {len(payload)}B exceeds slot stride "
                     f"{self._req_stride}B"
@@ -330,11 +330,11 @@ class ShmTransport(Transport):
                 _set_event(self._req_event)
 
             # Wait for a new reply -- kernel-event blocking wait when
-            # available, polling otherwise. Per-call rcv_timeout_ms
+            # available, polling otherwise. Per-call recv_timeout_ms
             # overrides the constructor default (used for begin_pie etc).
             effective_timeout_s = (
-                rcv_timeout_ms / 1000.0
-                if rcv_timeout_ms is not None
+                recv_timeout_ms / 1000.0
+                if recv_timeout_ms is not None
                 else self._rpc_timeout_s
             )
             deadline = time.monotonic() + effective_timeout_s

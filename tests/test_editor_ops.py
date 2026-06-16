@@ -34,7 +34,7 @@ def _make_client(port: int) -> URLabClient:
         "tcp://127.0.0.1",
         step_mode="direct",
         step_port=port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
 
@@ -42,7 +42,7 @@ def _make_client(port: int) -> URLabClient:
 def _open_session(client: URLabClient, mock_step_server, base_handshake):
     """Issue hello so subsequent ops have a session_id to send."""
     mock_step_server.replies.append(base_handshake)
-    client.discover()
+    client.connect()
 
 
 def test_editor_time_hello_succeeds_with_no_manager(mock_step_server, mujoco_mod):
@@ -55,7 +55,7 @@ def test_editor_time_hello_succeeds_with_no_manager(mock_step_server, mujoco_mod
         "tcp://127.0.0.1",
         step_mode="direct",
         step_port=mock_step_server.port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=True,
     )
     try:
@@ -67,7 +67,7 @@ def test_editor_time_hello_succeeds_with_no_manager(mock_step_server, mujoco_mod
             "manager_present": False,
             "articulations": [],
         })
-        client.discover()
+        client.connect()
     finally:
         client.close()
 
@@ -92,14 +92,14 @@ def test_handshake_defaults_manager_present_true_for_legacy_servers(
         "tcp://127.0.0.1",
         step_mode="auto",
         step_port=mock_step_server.port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
     try:
         # base_handshake has no manager_present field.
         assert "manager_present" not in base_handshake
         mock_step_server.replies.append(base_handshake)
-        client.discover()
+        client.connect()
     finally:
         client.close()
     assert client.manager_present is True
@@ -604,7 +604,7 @@ def test_set_qpos_mirrors_into_client_data_for_puppet_mode(
         "tcp://127.0.0.1",
         step_mode="puppet",
         step_port=mock_step_server.port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
     try:

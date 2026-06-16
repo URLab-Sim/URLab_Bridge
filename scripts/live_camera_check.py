@@ -69,7 +69,7 @@ def setup_scene_full(client, args) -> None:
         try:
             client.sim.stop()
             time.sleep(0.5)
-            client.discover()
+            client.connect()
         except Exception as exc:  # noqa: BLE001
             _log(f"  sim.stop failed (continuing): {exc}")
 
@@ -142,12 +142,12 @@ def main() -> int:
         args.host,
         step_port=args.step_port,
         mujoco_version_check=False,
-        rcv_timeout_ms=120_000,
+        recv_timeout_ms=120_000,
         transport=args.transport,
     )
 
     try:
-        client.discover()
+        client.connect()
     except ValueError as exc:
         _log(f"  first discover ValueError (ok): {exc}")
 
@@ -171,7 +171,7 @@ def main() -> int:
     # Skip MJB load to avoid any version-mismatch ValueError.
     client.local_model = False
     try:
-        client.discover()
+        client.connect()
     except ValueError as exc:
         _log(f"  post-PIE discover ValueError (ok): {exc}")
 

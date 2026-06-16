@@ -143,7 +143,7 @@ def main() -> int:
         state_port=args.state_port,
         transport=args.transport,
     )
-    client.discover()
+    client.connect()
     logger.info("session=%s articulations=%s",
                 client.session_id, sorted(client.articulations.keys()))
 

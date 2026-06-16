@@ -36,7 +36,7 @@ class URLabSpawnHandle:
     blueprints.
 
     Holds identity + UE-side info only; physics fields (joints, actuators,
-    sensors) aren't known until PIE runs and ``client.discover()``
+    sensors) aren't known until PIE runs and ``client.connect()``
     materialises a :class:`URLabArticulation` against the same
     ``actor_id``.
     """

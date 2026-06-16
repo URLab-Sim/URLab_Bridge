@@ -190,7 +190,7 @@ def test_apply_xfrc_unknown_body_raises(client):
 
 def test_actuator_set_control_and_value(client):
     vx = client.articulations["vx300s"]
-    vx.actuators["waist"].set_control(1.25)
+    vx.actuators["waist"].set_ctrl(1.25)
     assert vx.actuators["waist"].value == pytest.approx(1.25)
 
 

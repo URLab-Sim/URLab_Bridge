@@ -117,7 +117,7 @@ def main() -> int:
         state_port=args.state_port,
         transport=args.transport,
     )
-    client.discover()
+    client.connect()
 
     if args.sim_dt > 0:
         applied = client.runtime.set_sim_options(timestep=args.sim_dt, required=False)

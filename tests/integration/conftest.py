@@ -101,17 +101,17 @@ def live_endpoint():
     return {"address": HOST, "port": STEP_PORT}
 
 
-def _make_client(rcv_timeout_ms: int = 120_000):
+def _make_client(recv_timeout_ms: int = 120_000):
     """Default recv timeout is generous (120s) because editor ops like
     ``import_xml`` shell out to a Python subprocess + drive the BP factory,
     which can take 10-30s on a cold editor. The server side blocks on the
     game thread without its own deadline, so this is the only operational
-    cap. Per-test code can override via ``rcv_timeout_ms`` on individual
+    cap. Per-test code can override via ``recv_timeout_ms`` on individual
     RPC calls (e.g. sim.start passes its own).
     """
     from urlab_client import URLabClient
 
-    return URLabClient(HOST, step_port=STEP_PORT, rcv_timeout_ms=rcv_timeout_ms)
+    return URLabClient(HOST, step_port=STEP_PORT, recv_timeout_ms=recv_timeout_ms)
 
 
 @pytest.fixture(scope="session")
@@ -135,11 +135,11 @@ def _live_session():
     client = _make_client()
     state = None
     try:
-        client.discover()
+        client.connect()
         if client.manager_present:
             client.sim.stop()
             time.sleep(0.5)
-            client.discover()
+            client.connect()
         try:
             original_level = client.scene.current_level()
         except Exception:
@@ -170,7 +170,7 @@ def _live_session():
                 f"compile_error={result.compile_error[:200] if result.compile_error else ''}"
             )
         time.sleep(0.5)
-        client.discover()
+        client.connect()
         if client.step_mode != StepMode.DIRECT:
             client.runtime.set_mode(StepMode.DIRECT)
         yield state
@@ -215,7 +215,7 @@ def _ensure_pie_for_pie_client(client) -> None:
                 f"compile_error={result.compile_error[:200] if result.compile_error else ''}"
             )
         time.sleep(0.5)
-        client.discover()
+        client.connect()
     if client.step_mode != StepMode.DIRECT:
         client.runtime.set_mode(StepMode.DIRECT)
 
@@ -231,7 +231,7 @@ def fresh_live_client():
     """
     client = _make_client()
     try:
-        client.discover()
+        client.connect()
         yield client
     finally:
         try:
@@ -253,7 +253,7 @@ def pie_client(_live_session):
     state: SceneBootstrap = _live_session
     client = _make_client()
     try:
-        client.discover()
+        client.connect()
         _ensure_pie_for_pie_client(client)
         # Clean physics state for every test. reset() preserves the
         # active step mode and articulation count; only qpos/qvel/ctrl
@@ -273,7 +273,7 @@ def pie_client(_live_session):
         except Exception:
             pass
         try:
-            client.recording.clear()
+            client.recording.clear_buffer()
         except Exception:
             pass
         yield client
@@ -301,7 +301,7 @@ def scene_loaded_client(_live_session):
     state: SceneBootstrap = _live_session
     client = _make_client()
     try:
-        client.discover()
+        client.connect()
         yield client
     finally:
         try:

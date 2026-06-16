@@ -42,7 +42,7 @@ def _client(port: int) -> URLabClient:
         "tcp://127.0.0.1",
         step_mode="direct",
         step_port=port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
 
@@ -76,7 +76,7 @@ def test_reset_seed_round_trip_bit_identical(mock_step_server, base_handshake):
     mock_step_server.replies.extend([base_handshake, _step_reply([0.0, 0.0])])
     client = _client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.reset(seed=12345)
         req = mock_step_server.received[-1]
         assert req["op"] == "reset"
@@ -93,7 +93,7 @@ def test_seed_replays_produce_identical_wire_payloads(mock_step_server, base_han
     )
     client = _client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.reset(seed=42)
         client.reset(seed=42)
         # Compare the two reset requests
@@ -110,7 +110,7 @@ def test_msgpack_qpos_is_bit_exact(mock_step_server, base_handshake):
     mock_step_server.replies.extend([base_handshake, _step_reply(weird)])
     client = _client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         client.step()
         arm = client.articulations["vx300s"]
         # Bit-exact comparison via .view to bytes
@@ -127,7 +127,7 @@ def test_env_reset_passes_seed_to_client(mock_step_server, base_handshake):
     mock_step_server.replies.extend([base_handshake, _step_reply([0.0, 0.0])])
     client = _client(mock_step_server.port)
     try:
-        client.discover()
+        client.connect()
         env = URLabEnv(client, space_mode="flat")
         env.reset(seed=7777)
         req = mock_step_server.received[-1]
