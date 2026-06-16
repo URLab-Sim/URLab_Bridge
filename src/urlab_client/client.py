@@ -312,15 +312,13 @@ class URLabClient:
                 else:
                     raise
 
-        # Spin up streaming SUBs if the active mode is live.
-        # Covers two cases:
-        #  - User constructed with step_mode=AUTO/LIVE
-        #    and auto-promote didn't fire.
-        #  - User constructed with DIRECT/PUPPET but the server was locked
-        #    in live -- the warning above doesn't change the SUB
-        #    decision, so we still start them.
-        if self.step_mode in (StepMode.AUTO, StepMode.LIVE):
-            self._start_streaming_subs()
+        # Spin up streaming SUBs in EVERY mode. Cameras are served from the
+        # async SHM/ZMQ streams in all step modes now (not bundled into the
+        # step reply), so puppet and direct need the SUBs running too. This is
+        # what decouples camera rate from step rate -- a puppet step at 30Hz
+        # no longer blocks on (or bloats its RPC reply with) a camera readback.
+        # set_camera_streaming inside enables the per-camera broadcast.
+        self._start_streaming_subs()
 
     def _apply_handshake(self, reply: Mapping[str, Any]) -> None:
         """Shared entry point used by `discover()` and tests that inject
@@ -440,6 +438,8 @@ class URLabClient:
         n_steps: int = 1,
         *,
         include_cameras: Union[bool, Mapping[str, Any]] = False,
+        camera_query: str = "latest",
+        camera_timeout_s: float = 0.5,
         observations: Union[str, ObservationLevel] = "standard",
     ) -> Dict[str, Any]:
         """Advance the sim. Behaviour per `self.step_mode`:
@@ -454,13 +454,22 @@ class URLabClient:
           physics is what advances the sim; the request just stamps the
           requested ctrl and reads back the current state.
 
-        ``include_cameras`` accepts ``True`` / ``False`` for all-or-nothing,
-        or a mapping (e.g. ``{"head_rgbd": "sync"}``) to select specific
-        cameras. The mapping form is honoured in every step mode:
-        ``direct`` / ``puppet`` forward the per-camera ``"sync"`` /
-        ``"latest"`` hint to UE so the server can wait for a fresh
-        readback when requested; ``live`` matches the cached SUB-stream
-        frames against the requested key set.
+        Cameras are served from the async SHM/ZMQ streams in EVERY mode now
+        (not bundled into the step RPC reply -- that bloated the reply and
+        stalled high-rate puppet stepping). ``include_cameras`` selects which
+        cameras to attach to the reply: ``True`` for all, or a mapping/iterable
+        of camera names. ``camera_query`` picks the freshness policy:
+
+        - ``"latest"`` (default): attach whatever frame is currently cached.
+          Never blocks; may be a frame or two behind the just-stepped state.
+        - ``"fresh"``: wait (up to ``camera_timeout_s``) for a streamed frame
+          whose ``frame_id`` is >= this step's post-state ``frame_id`` before
+          attaching, guaranteeing the frame was rendered from this step's state
+          (or newer). If the wait times out, the latest frame is attached and
+          ``reply["cameras_stale"]`` is set True.
+
+        Either way the frames also land on ``art.cameras[name].latest_frame``
+        via the background stream; the reply's ``cameras`` block is a snapshot.
 
         Returns the raw step reply, useful when you need fields like
         ``sim_time`` or ``step`` directly; for state, prefer
@@ -470,78 +479,34 @@ class URLabClient:
         obs_str = wire(coerce(ObservationLevel, observations))
 
         if self.step_mode == StepMode.PUPPET:
-            return self._step_puppet(
-                n_steps, include_cameras=include_cameras, observations=obs_str
+            reply = self._step_puppet(n_steps, observations=obs_str)
+        else:
+            # Live and Direct both use the RPC step path. UE's step
+            # server applies ctrl + returns a state snapshot in either mode;
+            # the difference is whether mj_step actually runs (Direct) or the
+            # request just stamps NetworkValue and reads current state with
+            # UE's autonomous physics continuing to advance (Live).
+            reply = self._step_direct(n_steps, observations=obs_str)
+
+        if include_cameras:
+            self._attach_streamed_cameras(
+                reply, include_cameras, camera_query, camera_timeout_s
             )
-        # Live and Direct both use the RPC step path. UE's step
-        # server applies ctrl + returns a state snapshot in either mode;
-        # the difference is whether mj_step actually runs (Direct) or the
-        # request just stamps NetworkValue and reads current state with
-        # UE's autonomous physics continuing to advance (Live).
-        reply = self._step_direct(
-            n_steps, include_cameras=include_cameras, observations=obs_str
-        )
-        # In live mode we also want background-cached camera frames merged
-        # into the reply: UE doesn't grab cameras during a live-mode step
-        # (its publishers are running and the per-camera SUB threads on
-        # the bridge are already pulling frames). Do the merge here so the
-        # call site sees one consistent shape across modes.
-        if self.step_mode == StepMode.LIVE and include_cameras:
-            cams = self._gather_cached_cameras(include_cameras)
-            if cams:
-                reply["cameras"] = cams
         return reply
 
-    @staticmethod
-    def _wire_include_cameras(
-        include_cameras: Union[bool, Mapping[str, Any]],
-    ) -> Any:
-        """Serialize ``include_cameras`` for the wire, preserving value types
-        so the server reads per-camera modes AND frame-id requests:
-
-        - ``"latest"`` / ``"sync"`` -> string mode (latest available frame)
-        - ``int``                   -> a ``frame_id`` (the frame showing the
-                                       state at/after that step)
-        - ``{"frame_id": int}``     -> same, explicit
-
-        A bare ``True`` / ``False`` collapses to all-or-nothing. Note: a value
-        must NOT be coerced to ``str`` (an int frame_id stringified to
-        ``"123"`` would be read by the server as a mode and ignored)."""
-        if not isinstance(include_cameras, Mapping):
-            return bool(include_cameras)
-        out: Dict[str, Any] = {}
-        for k, v in include_cameras.items():
-            if isinstance(v, bool):
-                out[str(k)] = "latest"
-            elif isinstance(v, int):
-                out[str(k)] = int(v)  # frame_id
-            elif isinstance(v, Mapping):
-                entry: Dict[str, Any] = {}
-                if "frame_id" in v:
-                    entry["frame_id"] = int(v["frame_id"])
-                out[str(k)] = entry
-            else:
-                out[str(k)] = str(v)  # "latest" / "sync"
-        return out
-
     def _step_direct(
-        self, n_steps: int, *, include_cameras: Union[bool, Mapping[str, Any]],
-        observations: str,
+        self, n_steps: int, *, observations: str,
     ) -> Dict[str, Any]:
         per_art: Dict[str, Any] = {}
         for prefix, art in self.articulations.items():
             per_art[prefix] = art._build_step_request(control_mode=None)
 
-        # Preserve the mapping form on the wire so the server can read
-        # per-camera "sync"/"latest" hints. bool(include_cameras) collapses
-        # `{cam: "sync"}` to `True`, which the server's TryGetObjectField
-        # rejects -- no cameras block comes back and `latest_frame` stays
-        # None on the client.
-        wire_cameras: Any = self._wire_include_cameras(include_cameras)
+        # Cameras are NOT requested inline: they stream over SHM/ZMQ and are
+        # merged into the reply by _attach_streamed_cameras after the step.
+        # The reply's `frame_id` is what a "fresh" query synchronises against.
         request: Dict[str, Any] = {
             "n_steps": int(n_steps),
             "observations": observations,
-            "include_cameras": wire_cameras,
             "per_articulation": per_art,
         }
         reply = self._rpc("step", request, expected_op="step_ok")
@@ -553,8 +518,7 @@ class URLabClient:
         return reply
 
     def _step_puppet(
-        self, n_steps: int, *, include_cameras: Union[bool, Mapping[str, Any]],
-        observations: str,
+        self, n_steps: int, *, observations: str,
     ) -> Dict[str, Any]:
         if mujoco is None:
             raise RuntimeError("mujoco not installed; puppet mode requires it")
@@ -571,13 +535,11 @@ class URLabClient:
         for _ in range(int(n_steps)):
             mujoco.mj_step(self.model, self.data)
 
-        # Preserve the mapping form on the wire (see _step_direct).
-        wire_cameras: Any = self._wire_include_cameras(include_cameras)
+        # Cameras stream over SHM/ZMQ (see _step_direct); not requested inline.
         request: Dict[str, Any] = {
             "mode": wire(StepMode.PUPPET),
             "n_steps": int(n_steps),
             "observations": observations,
-            "include_cameras": wire_cameras,
             "time": float(self.data.time),
             "qpos": np.asarray(self.data.qpos, dtype=np.float64).tolist(),
             "qvel": np.asarray(self.data.qvel, dtype=np.float64).tolist(),
@@ -642,7 +604,11 @@ class URLabClient:
         URLabCameraView. The closure captures only string keys and resolves
         the live view on each call so a re-attached camera still updates."""
 
-        def _on_frame(pixels: bytes) -> None:
+        def _on_frame(
+            pixels: bytes,
+            frame_id: "Optional[int]" = None,
+            sim_time: "Optional[float]" = None,
+        ) -> None:
             art = self.articulations.get(prefix)
             if not art:
                 return
@@ -651,12 +617,13 @@ class URLabClient:
                 return
             try:
                 w, h = view.resolution
+                decoded = False
                 if view.mode == CameraMode.DEPTH:
                     # Single-channel PF_R32_FLOAT; one float per pixel.
                     arr = np.frombuffer(pixels, dtype=np.float32)
                     if arr.size == w * h:
                         view.latest_frame = arr.reshape((h, w))
-                        view.frame_count += 1
+                        decoded = True
                 else:
                     # REAL / SEMANTIC / INSTANCE all ship BGRA8. Real
                     # rotates to RGBA for consumer-friendliness; seg modes
@@ -670,24 +637,55 @@ class URLabClient:
                             view.latest_frame = bgra[..., [2, 1, 0, 3]]
                         else:
                             view.latest_frame = bgra
-                        view.frame_count += 1
+                        decoded = True
+                if decoded:
+                    view.frame_count += 1
+                    # frame_id / sim_time ride the stream header now (both
+                    # transports), so a "fresh" query can wait on the cache
+                    # until view.frame_id >= the step's post-state id. Set
+                    # them together with the pixels so they never diverge.
+                    if frame_id is not None:
+                        view.frame_id = frame_id
+                    if sim_time is not None:
+                        view.sim_time = sim_time
             except Exception as exc:
                 logger.debug("camera decode failed (%s/%s): %s",
                              prefix, cam_name, exc)
 
         return _on_frame
 
+    @staticmethod
+    def _select_camera_names(include_cameras: Any) -> "Optional[set]":
+        """Normalise the ``include_cameras`` argument to a set of camera names,
+        or ``None`` meaning "all cameras". Accepts:
+
+        - ``True``                 -> None (all)
+        - ``"cam1"`` (a str)       -> {"cam1"} (single camera)
+        - mapping ``{"cam1": ...}`` -> its keys (values are ignored; the
+          freshness policy is the ``camera_query`` arg, not a per-camera value)
+        - list / tuple / set       -> that set of names
+
+        Anything else (e.g. ``False``/``None``) yields an empty set -> nothing.
+        """
+        if include_cameras is True:
+            return None
+        if isinstance(include_cameras, str):
+            return {include_cameras}
+        if isinstance(include_cameras, Mapping):
+            return set(include_cameras.keys())
+        if isinstance(include_cameras, (list, tuple, set, frozenset)):
+            return set(include_cameras)
+        return set()
+
     def _gather_cached_cameras(self, include_cameras: Any) -> Dict[str, Dict[str, Any]]:
         """Read the latest cached frame off each requested URLabCameraView
         and bundle into a {prefix: {cam_name: {pixels, mode, ...}}} dict.
-        Used by free-mode step replies so they look like the cameras block
-        direct / puppet replies build server-side."""
-        if include_cameras is True:
-            wanted: Optional[set] = None
-        elif isinstance(include_cameras, Mapping):
-            wanted = set(include_cameras.keys())
-        else:
-            return {}
+
+        These frames arrive over the async SHM/ZMQ stream (in every step mode
+        now), not the step RPC reply. ``frame_id`` is the post-step state the
+        frame shows -- compare it against the step reply's ``frame_id`` to know
+        how fresh the frame is."""
+        wanted = self._select_camera_names(include_cameras)
         out: Dict[str, Dict[str, Any]] = {}
         for prefix, art in self.articulations.items():
             per_art: Dict[str, Any] = {}
@@ -702,10 +700,71 @@ class URLabClient:
                     "mode": mode,
                     "resolution": list(view.resolution),
                     "frame_count": view.frame_count,
+                    "frame_id": view.frame_id,
+                    "sim_time": view.sim_time,
                 }
             if per_art:
                 out[prefix] = per_art
         return out
+
+    def _wait_for_camera_frames(
+        self, include_cameras: Any, target_frame_id: int, timeout_s: float
+    ) -> bool:
+        """Block until every requested camera has streamed a frame whose
+        ``frame_id >= target_frame_id`` (the step's post-state id), or until
+        ``timeout_s`` elapses. Returns True if all reached the target.
+
+        This is the "fresh" guarantee: the monotonic frame_id is stamped when
+        the stepped state is pushed to the render snapshot, so a streamed frame
+        tagged >= it was rendered from a state at or after this step."""
+        wanted: Optional[set] = None
+        if isinstance(include_cameras, Mapping):
+            wanted = set(include_cameras.keys())
+
+        def _all_fresh() -> bool:
+            for art in self.articulations.values():
+                for cam_name, view in art.cameras.items():
+                    if wanted is not None and cam_name not in wanted:
+                        continue
+                    fid = view.frame_id
+                    if fid is None or fid < target_frame_id:
+                        return False
+            return True
+
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            if _all_fresh():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.001)
+
+    def _attach_streamed_cameras(
+        self,
+        reply: Dict[str, Any],
+        include_cameras: Any,
+        camera_query: str,
+        timeout_s: float,
+    ) -> None:
+        """Merge async-streamed camera frames into a step reply. ``latest``
+        takes whatever is cached; ``fresh`` first waits for a frame matching
+        this step's ``frame_id`` and sets ``reply["cameras_stale"]`` if the
+        wait timed out."""
+        if camera_query not in ("latest", "fresh"):
+            raise ValueError(
+                f"camera_query must be 'latest' or 'fresh', got {camera_query!r}"
+            )
+        if camera_query == "fresh":
+            target = reply.get("frame_id")
+            stale = False
+            if target is not None:
+                stale = not self._wait_for_camera_frames(
+                    include_cameras, int(target), timeout_s
+                )
+            reply["cameras_stale"] = stale
+        cams = self._gather_cached_cameras(include_cameras)
+        if cams:
+            reply["cameras"] = cams
 
     def reset(
         self,

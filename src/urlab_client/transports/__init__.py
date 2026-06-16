@@ -19,12 +19,38 @@ embeds the MJB)."""
 
 from __future__ import annotations
 
+import struct
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Tuple
 
 
 SnapshotCallback = Callable[[Mapping[str, Any]], None]
-FrameCallback = Callable[[bytes], None]
+# (pixels, frame_id, sim_time). frame_id / sim_time are None when the stream
+# carries no metadata header (legacy server, or a malformed frame).
+FrameCallback = Callable[[bytes, Optional[int], Optional[float]], None]
+
+# Per-frame metadata header prepended to streamed camera pixels on BOTH the
+# ZMQ and SHM transports. Must match FMjCameraFrameMeta on the UE side: a
+# fixed 32-byte little-endian POD, layout "<IIQdII":
+#   magic(u32) version(u32) frame_id(u64) sim_time(f64) width(u32) height(u32)
+CAMERA_META_MAGIC = 0x314D4355  # 'UCM1' little-endian
+CAMERA_META_STRUCT = struct.Struct("<IIQdII")
+CAMERA_META_SIZE = CAMERA_META_STRUCT.size  # 32
+
+
+def parse_camera_frame(payload: bytes) -> Tuple[bytes, Optional[int], Optional[float]]:
+    """Split a streamed camera payload into (pixels, frame_id, sim_time).
+
+    The payload is ``[FMjCameraFrameMeta (32 bytes)][pixels]``. If the leading
+    magic doesn't match (older server that streams bare pixels, or a runt
+    frame) the whole payload is returned as pixels with no frame_id, so the
+    "latest" query still works and "fresh" gracefully degrades to "latest".
+    """
+    if len(payload) >= CAMERA_META_SIZE:
+        magic, _ver, frame_id, sim_time, _w, _h = CAMERA_META_STRUCT.unpack_from(payload, 0)
+        if magic == CAMERA_META_MAGIC:
+            return payload[CAMERA_META_SIZE:], int(frame_id), float(sim_time)
+    return payload, None, None
 
 
 class Transport(ABC):
@@ -141,8 +167,11 @@ def make_transport(
 
 
 __all__ = [
+    "CAMERA_META_MAGIC",
+    "CAMERA_META_SIZE",
     "FrameCallback",
     "SnapshotCallback",
     "Transport",
     "make_transport",
+    "parse_camera_frame",
 ]

@@ -385,7 +385,7 @@ def test_camera_stream_round_trip(tmp_path):
         received: List[bytes] = []
         evt = threading.Event()
 
-        def on_frame(pixels: bytes) -> None:
+        def on_frame(pixels: bytes, frame_id=None, sim_time=None) -> None:
             received.append(pixels)
             evt.set()
 
@@ -404,7 +404,55 @@ def test_camera_stream_round_trip(tmp_path):
         os.close(fd)
 
     assert len(received) == 1
+    # No metadata header -> whole payload passes through as pixels.
     assert received[0] == payload
+
+
+def test_camera_stream_frame_meta_round_trip(tmp_path):
+    """A frame written with the 32-byte FMjCameraFrameMeta header is split by
+    the reader into (pixels, frame_id, sim_time)."""
+    import struct as _struct
+
+    from urlab_client.transports import CAMERA_META_MAGIC
+
+    shm_dir = str(tmp_path)
+    cam_path = os.path.join(shm_dir, "cam_arm0_head.shm")
+
+    width, height = 4, 4
+    pixel_bytes = width * height * 4
+    meta_size = 32
+    stride = pixel_bytes + meta_size + 4  # + size prefix
+    n_buffers = 2
+    fd = _create_state_shm(cam_path, stride, n_buffers)
+    try:
+        transport = ShmTransport(shm_dir, poll_interval_s=0.0005, open_timeout_s=2.0)
+        received = []
+        evt = threading.Event()
+
+        def on_frame(pixels, frame_id=None, sim_time=None) -> None:
+            received.append((pixels, frame_id, sim_time))
+            evt.set()
+
+        transport.start_camera_stream(
+            "arm0", "head", endpoint="tcp://*:5558",
+            topic="arm0/camera/head", on_frame=on_frame,
+        )
+        try:
+            time.sleep(0.05)
+            pixels = bytes(range(256))[:pixel_bytes]
+            meta = _struct.pack("<IIQdII", CAMERA_META_MAGIC, 1, 4242, 1.5, width, height)
+            _publish(cam_path, stride, n_buffers, meta + pixels)
+            assert evt.wait(timeout=2.0), "no camera frame delivered"
+        finally:
+            transport.stop_camera_streams()
+    finally:
+        os.close(fd)
+
+    assert len(received) == 1
+    got_pixels, got_fid, got_time = received[0]
+    assert got_pixels == pixels
+    assert got_fid == 4242
+    assert got_time == 1.5
 
 
 def test_rpc_timeout_when_server_silent(msgpack_mod, tmp_path):
