@@ -74,12 +74,12 @@ def matrix_client(request, _live_session):
     client = URLabClient(
         HOST,
         step_port=STEP_PORT,
-        rcv_timeout_ms=10_000,
+        recv_timeout_ms=10_000,
         step_mode=mode,
         transport=transport,
     )
     try:
-        client.discover()
+        client.connect()
         # After discover with auto_promote_step_mode (default True),
         # DIRECT / PUPPET have been set on the server. For LIVE we
         # explicitly demote so tests that ran before in DIRECT see

@@ -64,6 +64,6 @@ def test_sim_stop_returns_none(scene_loaded_client):
         # Defensive: prior test left PIE off.
         scene_loaded_client.sim.start(raise_on_failure=False, timeout_s=30.0)
         time.sleep(0.5)
-        scene_loaded_client.discover()
+        scene_loaded_client.connect()
     result = scene_loaded_client.sim.stop()
     assert result is None

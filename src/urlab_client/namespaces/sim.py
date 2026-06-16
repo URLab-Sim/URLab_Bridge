@@ -69,7 +69,7 @@ class _SimNamespace(_RpcNamespace):
         reply = self._client._rpc(
             "begin_pie", payload,
             expected_op="begin_pie_ok",
-            rcv_timeout_ms=int((timeout_s + 5.0) * 1000),
+            recv_timeout_ms=int((timeout_s + 5.0) * 1000),
         )
         # Coerce wire string to enum; tolerate unknowns (server may
         # introduce new lifecycle states ahead of the bridge).

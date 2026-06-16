@@ -98,7 +98,7 @@ def main() -> int:
         transport=args.transport,
         shm_dir=args.shm_dir,
     )
-    client.discover(observations="full")
+    client.connect(observations="full")
 
     if args.articulation:
         prefix = args.articulation

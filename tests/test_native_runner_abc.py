@@ -83,7 +83,7 @@ def _make_client(port: int) -> URLabClient:
         "tcp://127.0.0.1",
         step_mode="direct",
         step_port=port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
 
@@ -97,7 +97,7 @@ def test_native_runner_accepts_urlab_policy_abc(
     client = _make_client(mock_step_server.port)
     try:
         mock_step_server.replies.append(base_handshake)
-        client.discover()
+        client.connect()
         art = client.articulations["vx300s"]
 
         # The synthetic MJB has 'waist' and 'shoulder' joints.

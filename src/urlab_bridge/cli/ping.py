@@ -50,7 +50,7 @@ def main() -> None:
         step_port=args.step_port,
     )
     try:
-        client.discover()
+        client.connect()
     except Exception as exc:
         logger.error("Handshake failed: %s", exc)
         sys.exit(1)

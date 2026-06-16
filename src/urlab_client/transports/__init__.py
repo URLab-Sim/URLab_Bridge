@@ -67,7 +67,7 @@ class Transport(ABC):
         self,
         request: Mapping[str, Any],
         *,
-        rcv_timeout_ms: Optional[int] = None,
+        recv_timeout_ms: Optional[int] = None,
     ) -> Mapping[str, Any]:
         """Send one msgpack-serialisable dict, return one dict reply.
 
@@ -76,7 +76,7 @@ class Transport(ABC):
         exception on connection / parse failure; URLab error replies are
         returned as-is so the caller can branch on `reply["op"] == "error"`.
 
-        ``rcv_timeout_ms`` overrides the constructor-default recv timeout
+        ``recv_timeout_ms`` overrides the constructor-default recv timeout
         for this single call, then resets. Used for ops that legitimately
         block (e.g. ``begin_pie`` waiting on UE compile). Implementations
         that have no notion of a per-call timeout (in-process queues, etc.)
@@ -119,7 +119,7 @@ def make_transport(
     *,
     step_port: int = 5559,
     state_port: int = 5555,
-    rcv_timeout_ms: int = 5000,
+    recv_timeout_ms: int = 5000,
     shm_dir: Optional[str] = None,
     shm_session_id: str = "live",
     shm_open_timeout_s: float = 5.0,
@@ -141,7 +141,7 @@ def make_transport(
             address,
             step_port=step_port,
             state_port=state_port,
-            rcv_timeout_ms=rcv_timeout_ms,
+            recv_timeout_ms=recv_timeout_ms,
         )
     if name == "shm":
         from .zmq import ZmqTransport
@@ -153,7 +153,7 @@ def make_transport(
                 address,
                 step_port=step_port,
                 state_port=state_port,
-                rcv_timeout_ms=rcv_timeout_ms,
+                recv_timeout_ms=recv_timeout_ms,
             )
         return ShmTransport(
             shm_dir,

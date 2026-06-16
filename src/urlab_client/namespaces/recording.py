@@ -84,7 +84,7 @@ class URLabRecordingAPI:
         self.last_saved_path = abs_path
         return abs_path
 
-    def clear(self) -> None:
+    def clear_buffer(self) -> None:
         self._client._rpc(
             "recording_clear",
             {},

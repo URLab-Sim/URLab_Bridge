@@ -28,14 +28,14 @@ def _make_client(port: int) -> URLabClient:
         "tcp://127.0.0.1",
         step_mode="direct",
         step_port=port,
-        rcv_timeout_ms=2000,
+        recv_timeout_ms=2000,
         auto_promote_step_mode=False,
     )
 
 
 def _open_session(client, mock_step_server, base_handshake) -> None:
     mock_step_server.replies.append(base_handshake)
-    client.discover()
+    client.connect()
 
 
 def _spawn_reply(actor_id: str, *, actor_name: str | None = None) -> dict:

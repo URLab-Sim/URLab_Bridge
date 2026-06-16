@@ -76,13 +76,13 @@ class Actuator:
     force: Optional[float] = None
 
     # Populated by the owning articulation after construction so that
-    # `.set_control(v)` / `.value` round-trip through the articulation's
+    # `.set_ctrl(v)` / `.value` round-trip through the articulation's
     # local ctrl buffer without every actuator holding a back-reference
     # to the client transport.
     _art: "URLabArticulation | None" = field(default=None, repr=False)
     _local_index: int = field(default=-1, repr=False)
 
-    def set_control(self, v: float) -> None:
+    def set_ctrl(self, v: float) -> None:
         if self._art is None or self._local_index < 0:
             raise RuntimeError(f"Actuator {self.name!r} not bound to an articulation")
         self._art.ctrl_array[self._local_index] = float(v)
@@ -596,7 +596,7 @@ class URLabArticulation(URLabEntity):
     """Articulation: an entity with joints, actuators, sensors, bodies,
     cameras, and (optionally) a controller.
 
-    Built from an MjModel walk at `URLabClient.discover()`. The
+    Built from an MjModel walk at `URLabClient.connect()`. The
     articulation's `prefix` buckets MjModel names via
     `name.startswith(prefix + "_")`, mirroring how URLab generates names
     during XML import. Everything else comes straight from `MjModel`

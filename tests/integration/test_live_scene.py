@@ -79,7 +79,7 @@ def scratch_level(fresh_live_client, _live_session):
     if fresh_live_client.manager_present:
         fresh_live_client.sim.stop()
         _t.sleep(0.5)
-        fresh_live_client.discover()
+        fresh_live_client.connect()
     name = _scratch_level_name("scene")
     fresh_live_client.scene.create_level(name, force_overwrite=True)
     try:
