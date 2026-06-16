@@ -25,10 +25,12 @@ from ..enums import StepMode, coerce, wire
 from ..errors import URLabRPCError
 from .._op_helpers import target_payload
 from ..results import (
+    CameraStreamInfo,
     ContactsResult,
     KeyframeInfo,
     MocapPose,
     SimOptions,
+    _camera_streaming_from_wire,
     _contacts_result_from_wire,
     _keyframe_info_from_wire,
     _mocap_pose_from_wire,
@@ -71,7 +73,7 @@ class _RuntimeNamespace(_RpcNamespace):
 
     def set_camera_streaming(
         self, cameras: Mapping[str, Union[bool, Mapping[str, bool]]]
-    ) -> Dict[str, Any]:
+    ) -> "Dict[str, CameraStreamInfo]":
         """Enable/disable per-camera ZMQ/SHM broadcast streams at runtime.
 
         Needed because UE's ``bEnableAllCameras`` now defaults off: a camera
@@ -82,8 +84,8 @@ class _RuntimeNamespace(_RpcNamespace):
         - ``True`` / ``False`` — both transports on / off
         - ``{"zmq": bool, "shm": bool}`` — per-transport
 
-        Returns the per-camera reply ``{canonical: {streaming, zmq, shm,
-        zmq_endpoint, zmq_topic}}`` so you know exactly where to subscribe.
+        Returns ``{canonical: CameraStreamInfo}`` (streaming/zmq/shm/
+        zmq_endpoint/zmq_topic) so you know exactly where to subscribe.
         """
         wire: Dict[str, Any] = {}
         for key, val in cameras.items():
@@ -100,7 +102,7 @@ class _RuntimeNamespace(_RpcNamespace):
             "set_camera_streaming", {"cameras": wire},
             expected_op="set_camera_streaming_ok",
         )
-        return dict(reply.get("cameras") or {})
+        return _camera_streaming_from_wire(reply.get("cameras") or {})
 
     def set_sim_speed(self, percent: float) -> float:
         reply = self._client._rpc(

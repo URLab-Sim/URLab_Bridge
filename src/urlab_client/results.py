@@ -25,6 +25,69 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
+# Step / reset / forward
+# ---------------------------------------------------------------------------
+
+
+class StepResult(dict):
+    """Return of :meth:`URLabClient.step` / ``reset`` / ``forward``.
+
+    A plain ``dict`` (every existing ``reply["frame_id"]`` / ``reply.get(...)``
+    access keeps working) with typed attribute accessors for the common fields.
+    State still lives on ``client.data`` and the articulation accessors; this
+    is the per-call metadata in one tidy shape."""
+
+    @property
+    def frame_id(self) -> Optional[int]:
+        v = self.get("frame_id")
+        return int(v) if v is not None else None
+
+    @property
+    def sim_time(self) -> Optional[float]:
+        v = self.get("sim_time")
+        return float(v) if v is not None else None
+
+    @property
+    def step_index(self) -> Optional[int]:
+        v = self.get("step")
+        return int(v) if v is not None else None
+
+    @property
+    def cameras(self) -> Dict[str, Any]:
+        return self.get("cameras") or {}
+
+    @property
+    def cameras_stale(self) -> bool:
+        return bool(self.get("cameras_stale", False))
+
+
+@dataclass
+class CameraStreamInfo:
+    """Per-camera result of :meth:`URLabClient.runtime.set_camera_streaming`."""
+    streaming: bool
+    zmq: bool = False
+    shm: bool = False
+    zmq_endpoint: Optional[str] = None
+    zmq_topic: Optional[str] = None
+
+
+def _camera_streaming_from_wire(
+    cameras: Mapping[str, Any]
+) -> "Dict[str, CameraStreamInfo]":
+    out: Dict[str, CameraStreamInfo] = {}
+    for name, info in (cameras or {}).items():
+        info = info or {}
+        out[str(name)] = CameraStreamInfo(
+            streaming=bool(info.get("streaming", False)),
+            zmq=bool(info.get("zmq", False)),
+            shm=bool(info.get("shm", False)),
+            zmq_endpoint=info.get("zmq_endpoint"),
+            zmq_topic=info.get("zmq_topic"),
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # PIE lifecycle (sim namespace)
 # ---------------------------------------------------------------------------
 
