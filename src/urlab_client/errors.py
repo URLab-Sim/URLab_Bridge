@@ -49,5 +49,36 @@ class URLabPIEError(URLabRPCError):
         self.state = state
 
 
+class URLabTimeoutError(URLabRPCError, TimeoutError):
+    """Raised by the client-side await/readiness layer when a wait exceeds its
+    deadline. Also a ``TimeoutError`` so ``except TimeoutError`` works.
+
+    ``server_alive`` reflects whether the state stream looked fresh at timeout:
+    ``True`` -> server alive but the op is slow; ``False`` -> server appears
+    silent/hung; ``None`` -> no liveness signal available (e.g. not in PIE).
+    """
+
+    def __init__(
+        self,
+        description: str,
+        *,
+        waited_s: float,
+        server_alive: Optional[bool] = None,
+        op: Optional[str] = None,
+    ):
+        if server_alive is True:
+            tail = " (server alive but slow)"
+        elif server_alive is False:
+            tail = " (server appears silent/hung)"
+        else:
+            tail = ""
+        super().__init__(
+            "timeout", f"{description}: not ready after {waited_s:.1f}s{tail}", op=op
+        )
+        self.description = description
+        self.waited_s = waited_s
+        self.server_alive = server_alive
+
+
 class URLabVersionMismatch(RuntimeError):
     pass
