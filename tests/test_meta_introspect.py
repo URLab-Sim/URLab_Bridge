@@ -44,7 +44,7 @@ def test_discover_fetches_meta_and_populates_ops(mock_step_server, base_handshak
         "op": "meta_ok",
         "ops": [
             {"name": "spawn_actor",  "category": "editor_only",      "namespace": "scene"},
-            {"name": "destroy_actor","category": "editor_only",      "namespace": "scene"},
+            {"name": "remove_actor","category": "editor_only",      "namespace": "scene"},
             {"name": "step",         "category": "manager_required", "namespace": "sim"},
             {"name": "begin_pie",    "category": "editor_only",      "namespace": "runtime"},
         ],
@@ -56,7 +56,7 @@ def test_discover_fetches_meta_and_populates_ops(mock_step_server, base_handshak
         client.close()
 
     assert set(client._ops_meta.keys()) == {
-        "spawn_actor", "destroy_actor", "step", "begin_pie",
+        "spawn_actor", "remove_actor", "step", "begin_pie",
     }
     assert client._ops_meta["spawn_actor"]["namespace"] == "scene"
     assert client._ops_meta["step"]["category"] == "manager_required"

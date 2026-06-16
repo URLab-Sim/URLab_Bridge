@@ -199,7 +199,7 @@ def test_destroy_actor_removes_from_world(fresh_live_client, scratch_level):
     bp = fresh_live_client.scene.import_xml(XML_PATH)
     fresh_live_client.scene.spawn_actor(blueprint=bp, actor_id="delta")
 
-    result = fresh_live_client.scene.destroy_actor("delta")
+    result = fresh_live_client.scene.remove_actor("delta")
     assert result is None
 
     actors = fresh_live_client.outliner.list_actors()

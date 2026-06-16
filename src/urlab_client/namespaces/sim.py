@@ -82,6 +82,12 @@ class _SimNamespace(_RpcNamespace):
         if isinstance(hs, dict) and state == PIEState.READY:
             try:
                 self._client._apply_handshake(hs)
+                # PIE start is the moment the scene's cameras come into being.
+                # connect() starts the streaming subs for whatever cameras exist
+                # at handshake time; sim.start absorbs a FRESH handshake (the
+                # PIE cameras) so it must (re)start the subs too, or the cameras
+                # are discovered but never stream. Idempotent.
+                self._client._start_streaming_subs()
             except Exception as exc:
                 logger.warning(
                     "sim.start: handshake absorption failed: %s -- "

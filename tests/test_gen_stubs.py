@@ -48,7 +48,7 @@ def _meta_payload() -> dict:
         "ops": [
             {"name": "spawn_actor",  "category": "editor_only",      "namespace": "scene",
              "required_fields": ["blueprint", "target"]},
-            {"name": "destroy_actor","category": "editor_only",      "namespace": "scene"},
+            {"name": "remove_actor","category": "editor_only",      "namespace": "scene"},
             {"name": "step",         "category": "manager_required", "namespace": "sim"},
             {"name": "begin_pie",    "category": "editor_only",      "namespace": "runtime"},
             {"name": "list_actors",  "category": "editor_only",      "namespace": "outliner"},

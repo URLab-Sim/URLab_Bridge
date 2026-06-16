@@ -285,13 +285,13 @@ def test_destroy_actor_request_shape(mock_step_server, base_handshake):
     client = _make_client(mock_step_server.port)
     try:
         _open_session(client, mock_step_server, base_handshake)
-        mock_step_server.replies.append(wr.destroy_actor_ok(requires_pie_restart=False))
-        client.scene.destroy_actor("robot_a")
+        mock_step_server.replies.append(wr.remove_actor_ok(requires_pie_restart=False))
+        client.scene.remove_actor("robot_a")
     finally:
         client.close()
 
     req = mock_step_server.received[-1]
-    assert req["op"] == "destroy_actor"
+    assert req["op"] == "remove_actor"
     assert req["target"] == "robot_a"
     assert req.get("target_by", "actor_id") == "actor_id"
 
@@ -299,7 +299,47 @@ def test_destroy_actor_request_shape(mock_step_server, base_handshake):
 def test_destroy_actor_requires_target():
     client = _make_client(0)
     with pytest.raises(TypeError):
-        client.scene.destroy_actor()  # type: ignore[call-arg]  # missing positional
+        client.scene.remove_actor()  # type: ignore[call-arg]  # missing positional
+
+
+def test_async_editor_job_polls_op_status(mock_step_server, base_handshake):
+    """An async editor op returns op_started + job_id; the client polls
+    op_status until done and returns the embedded result transparently."""
+    client = _make_client(mock_step_server.port)
+    try:
+        _open_session(client, mock_step_server, base_handshake)
+        mock_step_server.replies.append(wr.op_started(job_id="job_7"))
+        mock_step_server.replies.append(wr.op_status_ok(job_id="job_7", state="running"))
+        mock_step_server.replies.append(wr.op_status_ok(
+            job_id="job_7", state="done",
+            result=wr.import_xml_ok(
+                blueprint_class_path="/Game/MuJoCoImports/x.x_C",
+                blueprint_short_name="x", imported_now=True),
+        ))
+        bp = client.scene.import_xml("/tmp/x.xml")
+    finally:
+        client.close()
+    assert bp.class_path == "/Game/MuJoCoImports/x.x_C"
+    ops = [r["op"] for r in mock_step_server.received]
+    assert "import_xml" in ops
+    assert ops.count("op_status") == 2
+
+
+def test_async_editor_job_failed_raises(mock_step_server, base_handshake):
+    """A failed async job surfaces as URLabRPCError carrying the job error."""
+    from urlab_client.errors import URLabRPCError
+
+    client = _make_client(mock_step_server.port)
+    try:
+        _open_session(client, mock_step_server, base_handshake)
+        mock_step_server.replies.append(wr.op_started(job_id="j"))
+        mock_step_server.replies.append(wr.op_status_ok(
+            job_id="j", state="failed",
+            result={"op": "error", "code": "import_failed", "message": "boom"}))
+        with pytest.raises(URLabRPCError):
+            client.scene.import_xml("/tmp/x.xml")
+    finally:
+        client.close()
 
 
 # ---------------------------------------------------------------------------
