@@ -249,6 +249,13 @@ class ZmqTransport(Transport):
             self._ctx = zmq.Context()
         sock = self._ctx.socket(zmq.SUB)
         sock.setsockopt(zmq.LINGER, 0)
+        # Bound the inbound queue: a live camera feed only cares about the
+        # newest frame, so don't let a slow consumer accumulate seconds of
+        # stale frames in the SUB queue (that's what made the dashboard lag
+        # ~3s). HWM must be set before connect. Combined with the drain-to-
+        # latest below, the delivered frame stays fresh regardless of how fast
+        # the consumer renders.
+        sock.setsockopt(zmq.RCVHWM, 4)
         try:
             # Endpoint from the handshake is "tcp://*:NNNN" (server bind
             # form). Connect to the same host the RPC is targeting on the
@@ -266,9 +273,21 @@ class ZmqTransport(Transport):
                     continue
                 except Exception:
                     break
-                pixels, frame_id, sim_time = parse_camera_frame(payload)
+                # Drain any backlog and keep only the freshest frame, so a slow
+                # consumer (heavy UI) never falls behind the publisher. Multipart
+                # delivery is atomic, so a NOBLOCK topic recv guarantees its
+                # payload is also available.
+                while True:
+                    try:
+                        sock.recv(flags=zmq.NOBLOCK)            # newer topic
+                        payload = sock.recv(flags=zmq.NOBLOCK)  # newer payload
+                    except zmq.Again:
+                        break
+                    except Exception:
+                        break
+                pixels, frame_id, sim_time, capture_time = parse_camera_frame(payload)
                 try:
-                    on_frame(pixels, frame_id, sim_time)
+                    on_frame(pixels, frame_id, sim_time, capture_time)
                 except Exception as exc:  # pragma: no cover - callback-defensive
                     logger.debug("camera frame callback raised: %s", exc)
         finally:

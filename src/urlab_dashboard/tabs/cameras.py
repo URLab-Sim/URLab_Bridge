@@ -12,12 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Cameras tab: live UE-rendered camera streams (Real / Seg / Depth)."""
+"""Cameras tab: live UE-rendered camera streams (Real / Seg / Depth).
+
+The feeds render in native OpenCV (cv2) windows, NOT dearpygui textures.
+Measurement showed the pipeline delivers frames at ~100ms content age (UE
+capture -> client has it) even under the full multi-camera load, yet dpg's
+texture/present path lagged the on-screen image by ~3s. cv2.imshow displays
+the identical streams in real time, so the live feeds pop out into their own
+windows while dpg keeps the control panel. See scripts/diag_content_latency.py
+and scripts/diag_cv_view.py for the diagnosis.
+"""
 
 from __future__ import annotations
 
+import os
+import time
 from typing import Dict, Optional
 
+import cv2
 import dearpygui.dearpygui as dpg
 import numpy as np
 
@@ -26,7 +38,13 @@ from urlab_client import URLabCameraView
 from urlab_client.enums import CameraMode
 
 
-_CAMERA_VIEWER_MAX = 320
+_CAMERA_VIEWER_MAX = 480  # cv2 window edge, px
+
+# Temporary latency diagnostic: set URLAB_CAM_DIAG=1 to print, once per second,
+# the true content age (now - UE capture time) of the probe camera plus the
+# per-tick conversion+imshow cost.
+_DIAG = os.environ.get("URLAB_CAM_DIAG") == "1"
+_diag_last = 0.0
 
 
 def _collect_views() -> Dict[str, URLabCameraView]:
@@ -41,109 +59,166 @@ def _collect_views() -> Dict[str, URLabCameraView]:
     return out
 
 
+def _enabled() -> bool:
+    if dpg.does_item_exist("cam_cv2_enabled"):
+        return bool(dpg.get_value("cam_cv2_enabled"))
+    return True
+
+
 def ensure_textures() -> None:
-    if not STATE.is_connected() or not dpg.does_item_exist("texture_registry"):
+    """Reconcile the set of open cv2 windows with the live cameras. Named
+    here (rather than ensure_windows) to preserve the app.py call contract."""
+    if not STATE.is_connected():
+        return
+    if not _enabled():
+        release_textures()
         return
     views = _collect_views()
-    # Drop stale.
+    # Drop windows for cameras that vanished or changed resolution.
     for key in list(STATE.cam_textures.keys()):
-        meta = STATE.cam_textures[key]
         new_view = views.get(key)
-        if new_view is None or new_view.resolution != meta["wh"]:
-            for tag in (meta["tex"], meta["img"], meta["row"], meta["lbl"]):
-                if dpg.does_item_exist(tag):
-                    dpg.delete_item(tag)
-            STATE.cam_textures.pop(key, None)
-    # Create new.
+        if new_view is None or new_view.resolution != STATE.cam_textures[key]["wh"]:
+            _destroy_window(key)
+    # Open windows for new cameras.
     for key, view in views.items():
         if key in STATE.cam_textures:
             continue
         w, h = view.resolution
         if w <= 0 or h <= 0:
             continue
-        tex = f"cam_tex::{key}"
-        img = f"cam_img::{key}"
-        row = f"cam_row::{key}"
-        lbl = f"cam_lbl::{key}"
-        init = [0.1, 0.1, 0.1, 1.0] * (w * h)
-        dpg.add_dynamic_texture(w, h, init, parent="texture_registry", tag=tex)
         scale = min(1.0, _CAMERA_VIEWER_MAX / max(w, h))
-        if dpg.does_item_exist("camera_streams_panel"):
-            with dpg.group(horizontal=True, parent="camera_streams_panel", tag=row):
-                dpg.add_image(tex, width=int(w * scale),
-                              height=int(h * scale), tag=img)
-                mode_str = view.mode.value if hasattr(view.mode, "value") else str(view.mode)
-                dpg.add_text(f"{key}\n{w}x{h} {mode_str}", tag=lbl)
-        STATE.cam_textures[key] = {
-            "tex": tex, "img": img, "row": row, "lbl": lbl, "wh": (w, h),
-        }
+        cv2.namedWindow(key, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(key, int(w * scale), int(h * scale))
+        STATE.cam_textures[key] = {"wh": (w, h), "last_count": -1}
+    _refresh_panel_list()
+
+
+def _destroy_window(key: str) -> None:
+    try:
+        cv2.destroyWindow(key)
+    except Exception:
+        pass
+    STATE.cam_textures.pop(key, None)
 
 
 def release_textures() -> None:
-    for meta in STATE.cam_textures.values():
-        for tag in (meta["tex"], meta["img"], meta["row"], meta["lbl"]):
-            if dpg.does_item_exist(tag):
-                dpg.delete_item(tag)
+    for key in list(STATE.cam_textures.keys()):
+        _destroy_window(key)
     STATE.cam_textures.clear()
+    # cv2 needs a GUI pump to actually tear the windows down.
+    try:
+        cv2.waitKey(1)
+    except Exception:
+        pass
+    _refresh_panel_list()
 
 
-def _frame_to_rgba_float(view: URLabCameraView) -> Optional[np.ndarray]:
+def _frame_to_bgr(view: URLabCameraView) -> Optional[np.ndarray]:
+    """Convert the view's latest frame to a contiguous uint8 BGR image for
+    cv2.imshow, or None if there is no usable frame."""
     frame = view.latest_frame
     if frame is None:
         return None
     w, h = view.resolution
     if view.mode == CameraMode.DEPTH:
-        # 5/95 percentile normalisation so foreground spans the visible
-        # gradient instead of being crushed by the skybox max.
         d = np.asarray(frame, dtype=np.float32)
         if d.shape != (h, w):
             return None
         finite = np.isfinite(d)
         if int(finite.sum()) < 16:
-            d_norm = np.zeros_like(d)
+            gray = np.zeros((h, w), dtype=np.uint8)
         else:
             p_low, p_high = np.percentile(d[finite], (5.0, 95.0))
             span = max(float(p_high - p_low), 1e-3)
-            d_norm = np.clip((d - p_low) / span, 0.0, 1.0)
-            d_norm[~finite] = 0.0
-        rgba = np.empty((h, w, 4), dtype=np.float32)
-        rgba[..., 0] = rgba[..., 1] = rgba[..., 2] = d_norm
-        rgba[..., 3] = 1.0
-        return rgba
+            norm = np.clip((d - p_low) / span, 0.0, 1.0)
+            norm[~finite] = 0.0
+            gray = (norm * 255.0).astype(np.uint8)
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     arr = np.asarray(frame, dtype=np.uint8)
     if arr.shape != (h, w, 4):
         return None
-    rgba_u8 = arr if view.mode == CameraMode.REAL else arr[..., [2, 1, 0, 3]]
-    return rgba_u8.astype(np.float32) / 255.0
+    # cv2 wants BGR. Real mode ships RGBA -> swap R/B; seg/instance ship BGRA
+    # -> already BGR order, just drop alpha.
+    if view.mode == CameraMode.REAL:
+        bgr = arr[..., [2, 1, 0]]
+    else:
+        bgr = arr[..., [0, 1, 2]]
+    return np.ascontiguousarray(bgr)
+
+
+def _refresh_panel_list() -> None:
+    if not dpg.does_item_exist("camera_streams_list"):
+        return
+    keys = sorted(STATE.cam_textures.keys())
+    if keys:
+        txt = "Open windows:\n  " + "\n  ".join(keys)
+    elif not STATE.is_connected():
+        txt = "(not connected)"
+    elif not _enabled():
+        txt = "(windows disabled)"
+    else:
+        txt = "(no cameras streaming)"
+    dpg.set_value("camera_streams_list", txt)
+
+
+def _on_toggle(_s=None, _a=None) -> None:
+    if _enabled():
+        ensure_textures()
+    else:
+        release_textures()
 
 
 def build(parent: str) -> None:
     with dpg.group(parent=parent):
         dpg.add_text(
-            "Live UE-rendered cameras. Real / Seg ship BGRA8; Depth is "
-            "float32 normalized per-frame for display.",
-            color=(140, 140, 140),
+            "Live UE-rendered cameras render in separate OpenCV windows for "
+            "real-time display (dearpygui's texture present path lags video "
+            "by seconds). Real / Seg ship BGRA8; Depth is float32 normalized "
+            "per-frame for display.",
+            color=(140, 140, 140), wrap=900,
         )
-        dpg.add_group(tag="camera_streams_panel")
+        dpg.add_checkbox(label="Show camera windows (OpenCV)",
+                         tag="cam_cv2_enabled", default_value=True,
+                         callback=_on_toggle)
+        dpg.add_separator()
+        dpg.add_text("(not connected)", tag="camera_streams_list")
 
 
 def tick() -> None:
-    if not STATE.is_connected():
+    if not STATE.is_connected() or not _enabled() or not STATE.cam_textures:
         return
+    global _diag_last
+    t0 = time.monotonic() if _DIAG else 0.0
+    probe_content_ms = float("nan")
+    n_shown = 0
     for key, meta in STATE.cam_textures.items():
         view = None
-        if "/" in key:
-            owner, cam = key.split("/", 1)
-            if owner == "global":
-                view = STATE.client.global_cameras.get(cam)
-            else:
-                art = STATE.client.articulations.get(owner)
-                if art is not None:
-                    view = art.cameras.get(cam)
+        owner, _, cam = key.partition("/")
+        if owner == "global":
+            view = STATE.client.global_cameras.get(cam)
+        else:
+            art = STATE.client.articulations.get(owner)
+            if art is not None:
+                view = art.cameras.get(cam)
         if view is None:
             continue
-        rgba = _frame_to_rgba_float(view)
-        if rgba is None:
+        if _DIAG and n_shown == 0 and view.capture_unix_time is not None:
+            probe_content_ms = (time.time() - view.capture_unix_time) * 1000.0
+        # Skip cameras with no new frame -- the window still shows the last one.
+        if view.frame_count == meta["last_count"]:
             continue
-        if dpg.does_item_exist(meta["tex"]):
-            dpg.set_value(meta["tex"], rgba.ravel())
+        bgr = _frame_to_bgr(view)
+        if bgr is None:
+            continue
+        cv2.imshow(key, bgr)
+        meta["last_count"] = view.frame_count
+        n_shown += 1
+    # Single GUI pump per tick drives every window's repaint.
+    cv2.waitKey(1)
+    if _DIAG:
+        now = time.monotonic()
+        if now - _diag_last >= 1.0:
+            _diag_last = now
+            print(f"[camdiag] tick={((now - t0) * 1000.0):5.1f}ms  "
+                  f"shown={n_shown}  CONTENT_AGE={probe_content_ms:6.0f}ms",
+                  flush=True)

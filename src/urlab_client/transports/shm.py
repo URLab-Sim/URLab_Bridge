@@ -512,16 +512,16 @@ class ShmTransport(Transport):
                 if size == 0 or size + 4 > stride:
                     last_seq = seq
                     continue
-                # Payload is [meta(32)][pixels]; size covers both.
+                # Payload is [meta][pixels]; size covers both.
                 payload = bytes(mm[slot_off + 4 : slot_off + 4 + size])
                 seq_after = struct.unpack_from("<Q", mm, SHM_OFF_SEQUENCE)[0]
                 if seq_after - seq > nbufs:
                     last_seq = seq_after
                     continue
                 last_seq = seq
-                pixels, frame_id, sim_time = parse_camera_frame(payload)
+                pixels, frame_id, sim_time, capture_time = parse_camera_frame(payload)
                 try:
-                    on_frame(pixels, frame_id, sim_time)
+                    on_frame(pixels, frame_id, sim_time, capture_time)
                 except Exception as exc:  # pragma: no cover - callback-defensive
                     logger.debug(
                         "ShmTransport: camera frame callback raised: %s", exc

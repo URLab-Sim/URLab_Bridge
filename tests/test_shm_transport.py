@@ -385,7 +385,8 @@ def test_camera_stream_round_trip(tmp_path):
         received: List[bytes] = []
         evt = threading.Event()
 
-        def on_frame(pixels: bytes, frame_id=None, sim_time=None) -> None:
+        def on_frame(pixels: bytes, frame_id=None, sim_time=None,
+                     capture_time=None) -> None:
             received.append(pixels)
             evt.set()
 
@@ -409,18 +410,18 @@ def test_camera_stream_round_trip(tmp_path):
 
 
 def test_camera_stream_frame_meta_round_trip(tmp_path):
-    """A frame written with the 32-byte FMjCameraFrameMeta header is split by
-    the reader into (pixels, frame_id, sim_time)."""
+    """A frame written with the 40-byte v2 FMjCameraFrameMeta header is split by
+    the reader into (pixels, frame_id, sim_time, capture_time)."""
     import struct as _struct
 
-    from urlab_client.transports import CAMERA_META_MAGIC
+    from urlab_client.transports import CAMERA_META_MAGIC, CAMERA_META_STRUCT_V2
 
     shm_dir = str(tmp_path)
     cam_path = os.path.join(shm_dir, "cam_arm0_head.shm")
 
     width, height = 4, 4
     pixel_bytes = width * height * 4
-    meta_size = 32
+    meta_size = CAMERA_META_STRUCT_V2.size  # 40
     stride = pixel_bytes + meta_size + 4  # + size prefix
     n_buffers = 2
     fd = _create_state_shm(cam_path, stride, n_buffers)
@@ -429,8 +430,9 @@ def test_camera_stream_frame_meta_round_trip(tmp_path):
         received = []
         evt = threading.Event()
 
-        def on_frame(pixels, frame_id=None, sim_time=None) -> None:
-            received.append((pixels, frame_id, sim_time))
+        def on_frame(pixels, frame_id=None, sim_time=None,
+                     capture_time=None) -> None:
+            received.append((pixels, frame_id, sim_time, capture_time))
             evt.set()
 
         transport.start_camera_stream(
@@ -440,7 +442,8 @@ def test_camera_stream_frame_meta_round_trip(tmp_path):
         try:
             time.sleep(0.05)
             pixels = bytes(range(256))[:pixel_bytes]
-            meta = _struct.pack("<IIQdII", CAMERA_META_MAGIC, 1, 4242, 1.5, width, height)
+            meta = CAMERA_META_STRUCT_V2.pack(
+                CAMERA_META_MAGIC, 2, 4242, 1.5, width, height, 1234.5)
             _publish(cam_path, stride, n_buffers, meta + pixels)
             assert evt.wait(timeout=2.0), "no camera frame delivered"
         finally:
@@ -449,10 +452,11 @@ def test_camera_stream_frame_meta_round_trip(tmp_path):
         os.close(fd)
 
     assert len(received) == 1
-    got_pixels, got_fid, got_time = received[0]
+    got_pixels, got_fid, got_time, got_capture = received[0]
     assert got_pixels == pixels
     assert got_fid == 4242
     assert got_time == 1.5
+    assert got_capture == 1234.5
 
 
 def test_rpc_timeout_when_server_silent(msgpack_mod, tmp_path):
