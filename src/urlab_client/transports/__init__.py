@@ -25,32 +25,50 @@ from typing import Any, Callable, Mapping, Optional, Tuple
 
 
 SnapshotCallback = Callable[[Mapping[str, Any]], None]
-# (pixels, frame_id, sim_time). frame_id / sim_time are None when the stream
-# carries no metadata header (legacy server, or a malformed frame).
-FrameCallback = Callable[[bytes, Optional[int], Optional[float]], None]
+# (pixels, frame_id, sim_time, capture_time). All but pixels are None when the
+# stream carries no metadata header (legacy server, or a malformed frame).
+# capture_time is Unix-epoch seconds the frame was captured (v2+ header), or
+# None on a v1 header that predates it.
+FrameCallback = Callable[
+    [bytes, Optional[int], Optional[float], Optional[float]], None]
 
 # Per-frame metadata header prepended to streamed camera pixels on BOTH the
-# ZMQ and SHM transports. Must match FMjCameraFrameMeta on the UE side: a
-# fixed 32-byte little-endian POD, layout "<IIQdII":
-#   magic(u32) version(u32) frame_id(u64) sim_time(f64) width(u32) height(u32)
+# ZMQ and SHM transports. Must match FMjCameraFrameMeta on the UE side.
+#   v1 (32B): magic(u32) version(u32) frame_id(u64) sim_time(f64) width(u32) height(u32)
+#   v2 (40B): ... + capture_unix_time(f64)   <- Unix seconds at capture
 CAMERA_META_MAGIC = 0x314D4355  # 'UCM1' little-endian
-CAMERA_META_STRUCT = struct.Struct("<IIQdII")
-CAMERA_META_SIZE = CAMERA_META_STRUCT.size  # 32
+CAMERA_META_STRUCT_V1 = struct.Struct("<IIQdII")     # 32
+CAMERA_META_STRUCT_V2 = struct.Struct("<IIQdIId")    # 40
+# Back-compat aliases (older imports expected a single 32-byte struct).
+CAMERA_META_STRUCT = CAMERA_META_STRUCT_V1
+CAMERA_META_SIZE = CAMERA_META_STRUCT_V1.size  # 32
 
 
-def parse_camera_frame(payload: bytes) -> Tuple[bytes, Optional[int], Optional[float]]:
-    """Split a streamed camera payload into (pixels, frame_id, sim_time).
+def parse_camera_frame(
+    payload: bytes,
+) -> Tuple[bytes, Optional[int], Optional[float], Optional[float]]:
+    """Split a streamed camera payload into (pixels, frame_id, sim_time,
+    capture_time).
 
-    The payload is ``[FMjCameraFrameMeta (32 bytes)][pixels]``. If the leading
-    magic doesn't match (older server that streams bare pixels, or a runt
-    frame) the whole payload is returned as pixels with no frame_id, so the
-    "latest" query still works and "fresh" gracefully degrades to "latest".
+    The payload is ``[FMjCameraFrameMeta][pixels]`` (32B v1 or 40B v2 header).
+    Version-tolerant: a v2 client reads ``capture_time`` from a v2 header and
+    leaves it ``None`` for a v1 header; pixels start after the version's header
+    size. If the magic doesn't match (legacy bare-pixel stream or a runt frame)
+    the whole payload is returned as pixels with no metadata, so "latest" still
+    works and "fresh" degrades gracefully.
     """
-    if len(payload) >= CAMERA_META_SIZE:
-        magic, _ver, frame_id, sim_time, _w, _h = CAMERA_META_STRUCT.unpack_from(payload, 0)
+    if len(payload) >= CAMERA_META_STRUCT_V1.size:
+        magic, ver, frame_id, sim_time, _w, _h = \
+            CAMERA_META_STRUCT_V1.unpack_from(payload, 0)
         if magic == CAMERA_META_MAGIC:
-            return payload[CAMERA_META_SIZE:], int(frame_id), float(sim_time)
-    return payload, None, None
+            if ver >= 2 and len(payload) >= CAMERA_META_STRUCT_V2.size:
+                (_m, _v, _f, _s, _w2, _h2, capture) = \
+                    CAMERA_META_STRUCT_V2.unpack_from(payload, 0)
+                return (payload[CAMERA_META_STRUCT_V2.size:],
+                        int(frame_id), float(sim_time), float(capture))
+            return (payload[CAMERA_META_STRUCT_V1.size:],
+                    int(frame_id), float(sim_time), None)
+    return payload, None, None, None
 
 
 class Transport(ABC):

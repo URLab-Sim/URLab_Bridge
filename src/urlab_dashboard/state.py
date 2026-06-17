@@ -77,8 +77,10 @@ class AppState:
     # Render flags
     render_request: bool = False
 
-    # Streamed-camera UI textures. Key = "<prefix>/<cam>" or "global/<cam>".
-    # Value = {"tex", "img", "row", "lbl", "wh"}.
+    # Open cv2 camera windows. Key = "<prefix>/<cam>" or "global/<cam>".
+    # Value = {"wh": (w, h), "last_count": int}. (Named cam_textures for
+    # historical app.py call-site compatibility; the live feeds render in
+    # OpenCV windows, not dpg textures -- see tabs/cameras.py.)
     cam_textures: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # Policy worker state

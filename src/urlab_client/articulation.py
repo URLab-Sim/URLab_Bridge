@@ -172,6 +172,15 @@ class URLabCameraView:
     latest_frame: Optional[np.ndarray] = None
     sim_time: Optional[float] = None
     frame_count: int = 0
+    # Wall-clock (time.monotonic) when `latest_frame` was last stored by the
+    # streaming callback. Lets a consumer measure how stale the frame it's
+    # about to display is, independent of sim_time / frame_id. None until the
+    # first frame arrives.
+    recv_monotonic: Optional[float] = None
+    # Unix-epoch seconds (UE FDateTime::UtcNow) when this frame was captured,
+    # from the v2 stream header. Directly comparable to Python time.time(), so
+    # content latency = time.time() - capture_unix_time. None on a v1 header.
+    capture_unix_time: Optional[float] = None
     # Post-step render-snapshot id of `latest_frame` (the step state it shows).
     # Set from the SHM/ZMQ stream's per-frame metadata header, together with
     # `latest_frame` so the two never diverge. A "fresh" step query waits until

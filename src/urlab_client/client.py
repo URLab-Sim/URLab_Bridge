@@ -986,6 +986,7 @@ class URLabClient:
             pixels: bytes,
             frame_id: "Optional[int]" = None,
             sim_time: "Optional[float]" = None,
+            capture_time: "Optional[float]" = None,
         ) -> None:
             art = self.articulations.get(prefix)
             if not art:
@@ -1018,6 +1019,7 @@ class URLabClient:
                         decoded = True
                 if decoded:
                     view.frame_count += 1
+                    view.recv_monotonic = time.monotonic()
                     # frame_id / sim_time ride the stream header now (both
                     # transports), so a "fresh" query can wait on the cache
                     # until view.frame_id >= the step's post-state id. Set
@@ -1026,6 +1028,8 @@ class URLabClient:
                         view.frame_id = frame_id
                     if sim_time is not None:
                         view.sim_time = sim_time
+                    if capture_time is not None:
+                        view.capture_unix_time = capture_time
             except Exception as exc:
                 logger.debug("camera decode failed (%s/%s): %s",
                              prefix, cam_name, exc)
