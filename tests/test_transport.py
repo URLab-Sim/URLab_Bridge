@@ -236,6 +236,66 @@ def test_configure_controller_rpc(mock_step_server, base_handshake):
     assert sent["params"]["kp"]["waist"] == 320.0
 
 
+def test_set_camera_delay_rpc(mock_step_server, base_handshake):
+    mock_step_server.replies.append(base_handshake)
+    mock_step_server.replies.append(wr.set_camera_delay_ok(cameras={
+        "wrist_cam": {
+            "delay_s": 0.05,
+            "jitter_s": 0.01,
+            "clock": "sim",
+            "on_state_change": True,
+            "max_fps": 0.0,
+        },
+        "head_cam": {
+            "delay_s": 0.1, "jitter_s": 0.0, "clock": "wall",
+            "on_state_change": False, "max_fps": 30.0,
+        },
+    }))
+    client = _make_client(mock_step_server.port)
+    try:
+        client.connect()
+        applied = client.runtime.set_camera_delay({
+            "wrist_cam": {"delay_s": 0.05, "jitter_s": 0.01, "seed": 7},
+            "head_cam": {
+                "delay_s": 0.1, "clock": "wall",
+                "on_state_change": False, "max_fps": 30.0,
+            },
+        })
+    finally:
+        client.close()
+
+    # Reply parsed into a plain {canonical: config} dict.
+    assert applied["wrist_cam"]["delay_s"] == 0.05
+    assert applied["head_cam"]["clock"] == "wall"
+    assert applied["head_cam"]["max_fps"] == 30.0
+
+    # Request the server saw carries the per-camera knobs.
+    sent = mock_step_server.received[1]
+    assert sent["op"] == "set_camera_delay"
+    assert sent["cameras"]["wrist_cam"]["delay_s"] == 0.05
+    assert sent["cameras"]["wrist_cam"]["jitter_s"] == 0.01
+    assert sent["cameras"]["wrist_cam"]["seed"] == 7
+    assert sent["cameras"]["head_cam"]["clock"] == "wall"
+    assert sent["cameras"]["head_cam"]["on_state_change"] is False
+    assert sent["cameras"]["head_cam"]["max_fps"] == 30.0
+
+
+def test_set_camera_delay_bare_float(mock_step_server, base_handshake):
+    """A bare float value is sent as delay_s with defaults."""
+    mock_step_server.replies.append(base_handshake)
+    mock_step_server.replies.append(wr.set_camera_delay_ok(cameras={
+        "wrist_cam": {"delay_s": 0.08, "jitter_s": 0.0, "clock": "sim"},
+    }))
+    client = _make_client(mock_step_server.port)
+    try:
+        client.connect()
+        client.runtime.set_camera_delay({"wrist_cam": 0.08})
+    finally:
+        client.close()
+    sent = mock_step_server.received[1]
+    assert sent["cameras"]["wrist_cam"] == 0.08
+
+
 def test_recording_start_stop_save(mock_step_server, base_handshake):
     from pathlib import Path
 

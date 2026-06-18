@@ -459,6 +459,14 @@ def configure_controller_ok(*, articulation: str = "",
     return {"op": "configure_controller_ok", "articulation": articulation, **extra}
 
 
+def set_camera_delay_ok(*, cameras: Optional[Dict[str, Any]] = None,
+                        **extra: Any) -> Dict[str, Any]:
+    """Echo of the per-camera latency / capture-rate config the server applied
+    (delay_s / jitter_s / clock / on_state_change / max_fps), keyed by canonical
+    camera name."""
+    return {"op": "set_camera_delay_ok", "cameras": dict(cameras or {}), **extra}
+
+
 def set_sim_options_ok(*, options: Optional[Dict[str, Any]] = None,
                        **extra: Any) -> Dict[str, Any]:
     """Echo of mjOption fields written by set_sim_options. The server
