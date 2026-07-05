@@ -178,6 +178,40 @@ def test_open_timeout_returns_silently(tmp_path):
     assert received == []
 
 
+def test_rpc_paths_override_decouples_from_stream_dir(tmp_path):
+    """The SHM RPC region (req/rep.shm + kernel events) lives on its own static
+    session, given verbatim by the `shm_rpc` handshake contract, while the
+    camera/state streams stay on the per-PIE stream dir. Pointing RPC at the
+    stream dir is what caused the 5s-per-step stall."""
+    stream_dir = str(tmp_path / "pie-guid-session")
+    rpc_req = str(tmp_path / "live" / "req.shm")
+    rpc_rep = str(tmp_path / "live" / "rep.shm")
+    t = ShmTransport(
+        stream_dir,
+        rpc_req_path=rpc_req,
+        rpc_rep_path=rpc_rep,
+        rpc_req_event="Local\\URLab_live_req_ready",
+        rpc_rep_event="Local\\URLab_live_rep_ready",
+    )
+    assert t._req_path == rpc_req
+    assert t._rep_path == rpc_rep
+    # streams stay on the stream dir
+    assert t._state_path == os.path.join(stream_dir, "state.shm")
+    assert t._req_event_name == "Local\\URLab_live_req_ready"
+    assert t._rep_event_name == "Local\\URLab_live_rep_ready"
+
+
+def test_rpc_paths_default_to_stream_dir_without_contract(tmp_path):
+    """Legacy servers that don't advertise `shm_rpc`: RPC paths derive from
+    shm_dir and event names fall back to the session-id convention."""
+    shm_dir = str(tmp_path)
+    t = ShmTransport(shm_dir)
+    assert t._req_path == os.path.join(shm_dir, "req.shm")
+    assert t._rep_path == os.path.join(shm_dir, "rep.shm")
+    assert t._req_event_name is None
+    assert t._rep_event_name is None
+
+
 def test_close_stops_reader_thread(msgpack_mod, tmp_path):
     """close() joins the reader thread cleanly even with no fallback."""
     shm_dir = str(tmp_path)

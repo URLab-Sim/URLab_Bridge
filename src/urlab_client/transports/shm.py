@@ -144,6 +144,10 @@ class ShmTransport(Transport):
         rpc_timeout_s: float = 5.0,
         session_id: str = "live",
         use_kernel_events: bool = True,
+        rpc_req_path: Optional[str] = None,
+        rpc_rep_path: Optional[str] = None,
+        rpc_req_event: Optional[str] = None,
+        rpc_rep_event: Optional[str] = None,
     ):
         self.shm_dir = shm_dir
         self._fallback = fallback
@@ -153,9 +157,16 @@ class ShmTransport(Transport):
         self._session_id = session_id
         self._use_kernel_events = use_kernel_events and _IS_WINDOWS
 
+        # state.shm + cam_*.shm live on the per-PIE STREAM session (shm_dir).
+        # The RPC region (req/rep.shm + its kernel events) lives on the RPC
+        # transport's own session, given verbatim by the `shm_rpc` handshake
+        # contract; fall back to the stream dir / session name for legacy
+        # servers that don't advertise it.
         self._state_path = os.path.join(shm_dir, "state.shm")
-        self._req_path = os.path.join(shm_dir, "req.shm")
-        self._rep_path = os.path.join(shm_dir, "rep.shm")
+        self._req_path = rpc_req_path or os.path.join(shm_dir, "req.shm")
+        self._rep_path = rpc_rep_path or os.path.join(shm_dir, "rep.shm")
+        self._req_event_name = rpc_req_event
+        self._rep_event_name = rpc_rep_event
         self._state_thread: Optional[threading.Thread] = None
         self._state_stop: Optional[threading.Event] = None
 
@@ -242,8 +253,10 @@ class ShmTransport(Transport):
                 # the events should be openable. If they're not (different
                 # UE version, permissions, etc.), fall back to polling.
                 if self._use_kernel_events and self._req_event is None:
-                    req_name = f"Local\\URLab_{self._session_id}_req_ready"
-                    rep_name = f"Local\\URLab_{self._session_id}_rep_ready"
+                    req_name = (self._req_event_name
+                                or f"Local\\URLab_{self._session_id}_req_ready")
+                    rep_name = (self._rep_event_name
+                                or f"Local\\URLab_{self._session_id}_rep_ready")
                     self._req_event = _open_named_event(req_name)
                     self._rep_event = _open_named_event(rep_name)
                     if self._req_event and self._rep_event:

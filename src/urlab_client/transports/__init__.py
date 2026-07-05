@@ -142,6 +142,10 @@ def make_transport(
     shm_session_id: str = "live",
     shm_open_timeout_s: float = 5.0,
     fallback: Optional[Transport] = None,
+    rpc_req_path: Optional[str] = None,
+    rpc_rep_path: Optional[str] = None,
+    rpc_req_event: Optional[str] = None,
+    rpc_rep_event: Optional[str] = None,
 ) -> Transport:
     """Pluggable transport factory. Supports `name in {"zmq", "shm"}`.
 
@@ -178,6 +182,10 @@ def make_transport(
             fallback=fallback,
             session_id=shm_session_id,
             open_timeout_s=shm_open_timeout_s,
+            rpc_req_path=rpc_req_path,
+            rpc_rep_path=rpc_rep_path,
+            rpc_req_event=rpc_req_event,
+            rpc_rep_event=rpc_rep_event,
         )
     raise ValueError(
         f"unknown transport name {name!r}; expected one of 'zmq', 'shm'"
