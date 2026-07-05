@@ -140,6 +140,11 @@ class URLabClient:
         # False until PIE starts; editor-only ops still work pre-PIE.
         self.manager_present: bool = False
         self.shm_session_dir: str = ""
+        # Explicit SHM RPC contract from the handshake (session/paths/event
+        # names for req.shm/rep.shm). The RPC region lives on its own static
+        # session, distinct from the per-PIE camera/state stream dir; the
+        # transport must use these verbatim or every RPC stalls its full timeout.
+        self._shm_rpc_contract: Optional[Dict[str, Any]] = None
         self.model: Any = None
         self.data: Any = None
         # Set by _apply_handshake_locked when the MJB couldn't load and the
@@ -497,6 +502,9 @@ class URLabClient:
         # always has a manager). Editor-time hello explicitly sets false.
         self.manager_present = bool(reply.get("manager_present", True))
         self.shm_session_dir = str(reply.get("shm_session_dir", "") or "")
+        rpc_contract = reply.get("shm_rpc")
+        if isinstance(rpc_contract, Mapping):
+            self._shm_rpc_contract = dict(rpc_contract)
 
         if self.mujoco_version_check and mujoco is not None:
             server_ver = str(self.mujoco_version or "")
@@ -609,29 +617,40 @@ class URLabClient:
         once the handshake has provided the session dir. The existing ZMQ
         transport is reused as the SHM transport's fallback (for ops too
         large for the SHM slot, notably `hello`)."""
+        # shm_dir is the per-PIE camera/state STREAM session (state.shm +
+        # cam_*.shm live here). The RPC region (req.shm/rep.shm + its kernel
+        # events) lives on the RPC transport's OWN, static session, advertised
+        # verbatim in the `shm_rpc` handshake block -- a DIFFERENT directory.
+        # These must be wired separately: pointing RPC at the stream dir stalls
+        # every RPC its full timeout (UE's RPC worker never services it), and
+        # pointing the streams at the RPC dir starves state/cameras. Precedence
+        # for the stream dir: explicit override > handshake stream dir.
         shm_dir = self._shm_dir_override or self.shm_session_dir
         if not shm_dir:
             raise RuntimeError(
                 "transport='shm' requested but neither shm_dir override nor "
                 "handshake `shm_session_dir` was set; pass shm_dir explicitly"
             )
-        # The SHM session id is the basename of the dir -- UE's
-        # USmStepTransport uses it to name its kernel events
-        # (`Local\URLab_<sid>_req_ready`), and the bridge must use the
-        # same name to OpenEventW. Distinct from `self.session_id`,
-        # which is the dispatcher's per-hello RPC session GUID.
         shm_session_id = os.path.basename(os.path.normpath(shm_dir)) or "live"
+
+        # RPC region: use the advertised contract verbatim when present; else
+        # fall back to deriving from the stream dir (legacy servers).
+        contract = self._shm_rpc_contract or {}
         self._transport = make_transport(
             "shm",
             self.address,
             shm_dir=shm_dir,
             shm_session_id=shm_session_id,
             fallback=self._transport,
+            rpc_req_path=contract.get("req_path"),
+            rpc_rep_path=contract.get("rep_path"),
+            rpc_req_event=contract.get("req_event"),
+            rpc_rep_event=contract.get("rep_event"),
         )
         self._pending_shm_swap = False
         logger.info(
-            "URLabClient: SHM transport active (dir=%s, session=%s)",
-            shm_dir, shm_session_id,
+            "URLabClient: SHM transport active (stream_dir=%s, rpc_session=%s)",
+            shm_dir, contract.get("session", shm_session_id),
         )
 
     # -- step / reset -----------------------------------------------------
@@ -671,6 +690,12 @@ class URLabClient:
           attaching, guaranteeing the frame was rendered from this step's state
           (or newer). If the wait times out, the latest frame is attached and
           ``reply["cameras_stale"]`` is set True.
+
+        For a bounded, real-sensor-style camera lag that keeps the step loop
+        running at full speed, configure a server-side delay with
+        ``runtime.set_camera_delay(...)`` -- the delay is applied natively in UE
+        so every consumer sees the already-delayed stream, and a delayed camera
+        never blocks the step on the current render.
 
         Either way the frames also land on ``art.cameras[name].latest_frame``
         via the background stream; the reply's ``cameras`` block is a snapshot.
