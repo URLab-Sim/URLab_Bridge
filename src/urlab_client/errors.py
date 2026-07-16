@@ -81,4 +81,7 @@ class URLabTimeoutError(URLabRPCError, TimeoutError):
 
 
 class URLabVersionMismatch(RuntimeError):
-    pass
+    """No longer raised: a MuJoCo version skew logs a warning and the
+    client builds its local model from the compiled XML instead of the
+    version-locked MJB. Kept exported so existing `except` clauses don't
+    break."""

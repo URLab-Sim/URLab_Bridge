@@ -34,7 +34,7 @@ from .enums import (
     coerce,
     wire,
 )
-from .errors import URLabRPCError, URLabTimeoutError, URLabVersionMismatch
+from .errors import URLabRPCError, URLabTimeoutError
 from .results import StepResult
 from .namespaces.debug import _DebugNamespace
 from .namespaces.outliner import _OutlinerNamespace
@@ -142,6 +142,10 @@ class URLabClient:
         self.shm_session_dir: str = ""
         self.model: Any = None
         self.data: Any = None
+        # Set by _apply_handshake_locked when the MJB couldn't load and the
+        # reply carried no compiled XML; the outer _apply_handshake then
+        # refetches the handshake once with include_assets=true.
+        self._model_fallback_pending: bool = False
         self.sim_time: float = 0.0
         self.step_count: int = 0
 
@@ -335,9 +339,11 @@ class URLabClient:
     # -- session lifecycle ------------------------------------------------
 
     def connect(self, observations: Union[str, ObservationLevel] = "standard") -> None:
-        """Handshake: send `hello`, load the MJB, construct articulation
-        wrappers. Raises on a version mismatch unless
-        `mujoco_version_check=False` was set.
+        """Handshake: send `hello`, build the local model (MJB fast path,
+        compiled-XML fallback when the server runs a different MuJoCo
+        version), construct articulation wrappers. A version skew logs a
+        warning (silenced by `mujoco_version_check=False`); it no longer
+        raises.
 
         After the handshake, if the user constructed the client with an
         explicit `step_mode` (`direct` or `puppet`), tell the server to
@@ -446,6 +452,42 @@ class URLabClient:
         with self._data_lock:
             self._apply_handshake_locked(reply)
 
+        # The MJB didn't load (version skew) and this reply carried no
+        # compiled XML: refetch the handshake once with assets included.
+        # Outside _data_lock -- this is an RPC round-trip.
+        if self._model_fallback_pending:
+            self._model_fallback_pending = False
+            logger.info(
+                "refetching handshake with include_assets=true to build the "
+                "local model from compiled XML"
+            )
+            fresh = self._rpc(
+                "hello",
+                {
+                    "client_version": self._client_version(),
+                    "encoding": "msgpack",
+                    "include_assets": True,
+                },
+                expected_op="hello_ok",
+            )
+            with self._data_lock:
+                self._apply_handshake_locked(fresh)
+            # One retry only -- an older server that never ships
+            # mjcf_compiled would otherwise refetch on every handshake.
+            self._model_fallback_pending = False
+
+        if (
+            self.local_model
+            and mujoco is not None
+            and self.model is None
+            and self.articulations
+        ):
+            logger.warning(
+                "no local MjModel could be built from this handshake; "
+                "articulation joint/actuator maps are EMPTY, so name-based "
+                "control (policy adapters, art.set_ctrl) will silently no-op"
+            )
+
     def _apply_handshake_locked(self, reply: Mapping[str, Any]) -> None:
         self.session_id = reply.get("session_id")
         self.urlab_version = reply.get("urlab_version")
@@ -460,16 +502,60 @@ class URLabClient:
             server_ver = str(self.mujoco_version or "")
             client_ver = mujoco.__version__
             if server_ver and server_ver != client_ver:
-                raise URLabVersionMismatch(
-                    f"MuJoCo version mismatch: server={server_ver!r} "
-                    f"client={client_ver!r}. Pin both sides or pass "
-                    f"mujoco_version_check=False to bypass."
-                )
+                # Warn, never raise: a skew only matters for the local-model
+                # MJB load, and that path falls back to the version-portable
+                # compiled-XML route below.
+                if _major_minor(server_ver) != _major_minor(client_ver):
+                    logger.warning(
+                        "MuJoCo version skew: server=%s client=%s. The MJB "
+                        "binary format is version-locked, so the local model "
+                        "will be built from the compiled XML instead; puppet "
+                        "mode may still behave differently across versions.",
+                        server_ver, client_ver,
+                    )
+                else:
+                    logger.debug(
+                        "MuJoCo patch-level skew: server=%s client=%s",
+                        server_ver, client_ver,
+                    )
 
-        # Load MJB into a local MjModel.
+        # Build the local MjModel: MJB fast path, then the version-portable
+        # compiled-XML fallback (an MJB only loads into the exact MuJoCo
+        # version that saved it). When neither is present in this reply but
+        # a manager is live, flag a one-shot asset refetch -- everything
+        # that resolves joints/actuators (URLabArticulation._walk_model)
+        # needs a model, and building it silently empty bricks every
+        # name-based consumer (issue #76).
+        self._model_fallback_pending = False
         mjb_bytes = reply.get("mjb")
-        if self.local_model and mjb_bytes and mujoco is not None:
-            self.model, self.data = _load_mjb(mjb_bytes)
+        mjcf_xml = reply.get("mjcf_compiled")
+        if self.local_model and mujoco is not None and (mjb_bytes or mjcf_xml):
+            model = data = None
+            if mjb_bytes:
+                try:
+                    model, data = _load_mjb(mjb_bytes)
+                except Exception as exc:
+                    logger.warning(
+                        "MJB load failed (%s); falling back to the compiled-"
+                        "XML model (server mujoco %s, client %s)",
+                        exc, self.mujoco_version,
+                        mujoco.__version__,
+                    )
+            if model is None:
+                if mjcf_xml:
+                    model, data = _load_xml_with_assets(
+                        str(mjcf_xml), reply.get("vfs_assets") or {}
+                    )
+                    logger.info(
+                        "local model built from compiled XML (%d assets)",
+                        len(reply.get("vfs_assets") or {}),
+                    )
+                else:
+                    self._model_fallback_pending = bool(
+                        reply.get("manager_present", True)
+                    )
+            if model is not None:
+                self.model, self.data = model, data
 
         # Build articulations
         self.articulations = {}
@@ -1481,6 +1567,28 @@ class URLabClient:
             self.data.time = float(reply["time"])
         if mujoco is not None and self.model is not None and self.data is not None:
             mujoco.mj_forward(self.model, self.data)
+
+
+def _major_minor(version: str) -> str:
+    return ".".join(str(version).split(".")[:2])
+
+
+def _load_xml_with_assets(xml: str, assets: Mapping[str, Any]) -> Tuple[Any, Any]:
+    """Build an MjModel from the handshake's compiled MJCF + VFS assets.
+
+    Version-portable counterpart to `_load_mjb`: XML parses across MuJoCo
+    releases, while an MJB only loads into the exact version that saved it.
+    Asset keys are the bare filenames the server rewrote the `file=` refs to.
+    """
+    if mujoco is None:  # pragma: no cover
+        raise RuntimeError("mujoco not installed")
+    asset_dict = {}
+    for name, blob in (assets or {}).items():
+        if isinstance(blob, (bytearray, memoryview)):
+            blob = bytes(blob)
+        asset_dict[str(name)] = blob
+    model = mujoco.MjModel.from_xml_string(xml, asset_dict)
+    return model, mujoco.MjData(model)
 
 
 def _load_mjb(buf: bytes) -> Tuple[Any, Any]:
