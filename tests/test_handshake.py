@@ -27,7 +27,6 @@ import pytest
 from urlab_client import (
     URLabClient,
     URLabPDController,
-    URLabVersionMismatch,
 )
 from urlab_client.enums import ActuatorType, CameraMode, ControlMode
 
@@ -194,17 +193,72 @@ def test_actuator_set_control_and_value(client):
     assert vx.actuators["waist"].value == pytest.approx(1.25)
 
 
-def test_version_mismatch_raises(base_handshake):
+def test_version_mismatch_warns_not_raises(base_handshake, caplog):
+    # A skew is survivable now (compiled-XML fallback), so the check warns
+    # instead of raising URLabVersionMismatch.
     bad = dict(base_handshake)
     bad["mujoco_version"] = "99.99.99"
     client = URLabClient(step_mode="direct", mujoco_version_check=True)
-    with pytest.raises(URLabVersionMismatch):
+    with caplog.at_level("WARNING", logger="urlab_client.client"):
         client._apply_handshake(bad)
+    assert client.mujoco_version == "99.99.99"
+    assert any("version skew" in r.message for r in caplog.records)
+    # The MJB in this fixture is loadable regardless of the version string.
+    assert client.model is not None
 
 
-def test_version_mismatch_bypass(base_handshake):
+def test_version_mismatch_bypass_is_silent(base_handshake, caplog):
     bad = dict(base_handshake)
     bad["mujoco_version"] = "99.99.99"
     client = URLabClient(step_mode="direct", mujoco_version_check=False)
-    client._apply_handshake(bad)  # must not raise
+    with caplog.at_level("WARNING", logger="urlab_client.client"):
+        client._apply_handshake(bad)
     assert client.mujoco_version == "99.99.99"
+    assert not any("version skew" in r.message for r in caplog.records)
+
+
+_FALLBACK_XML = """
+<mujoco model="urlab_fallback">
+  <worldbody>
+    <body name="vx300s_waist_link" pos="0 0 0.1">
+      <joint name="vx300s_waist" type="hinge" axis="0 0 1"/>
+      <geom type="sphere" size="0.02"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="vx300s_waist" joint="vx300s_waist"/>
+  </actuator>
+</mujoco>
+"""
+
+
+def test_unloadable_mjb_falls_back_to_compiled_xml(base_handshake):
+    # An MJB only loads into the exact MuJoCo version that saved it; when
+    # it can't load, the client must build the model from mjcf_compiled.
+    bad = dict(base_handshake)
+    bad["mjb"] = b"not an mjb"
+    bad["mjcf_compiled"] = _FALLBACK_XML
+    client = URLabClient(step_mode="direct")
+    client._apply_handshake(bad)
+    assert client.model is not None
+    assert client.model.nu == 1
+    vx = client.articulations["vx300s"]
+    assert set(vx.joints.keys()) == {"waist"}
+    assert set(vx.actuators.keys()) == {"waist"}
+
+
+def test_unloadable_mjb_without_xml_leaves_no_model_and_warns(
+    base_handshake, caplog
+):
+    # No mjcf_compiled and no manager to refetch from: the client must
+    # say loudly that articulation maps are empty (issue #76 was this
+    # failing silently).
+    bad = dict(base_handshake)
+    bad["mjb"] = b"not an mjb"
+    bad["manager_present"] = False
+    client = URLabClient(step_mode="direct")
+    with caplog.at_level("WARNING", logger="urlab_client.client"):
+        client._apply_handshake(bad)
+    assert client.model is None
+    assert client.articulations["vx300s"].joints == {}
+    assert any("maps are EMPTY" in r.message for r in caplog.records)
