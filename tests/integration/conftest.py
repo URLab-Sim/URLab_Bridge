@@ -111,13 +111,12 @@ def _make_client(recv_timeout_ms: int = 120_000):
     """
     from urlab_client import URLabClient
 
-    # The bridge deliberately pins mujoco==3.8.1 (mjlab / mujoco-warp compat)
-    # while the UE plugin may run a newer mujoco (e.g. 3.10.0). Bypass the
-    # version gate and skip the cross-version MJB load so the live suite runs
-    # against the current editor; puppet-mode tests guard on client.model.
+    # The bridge pins mujoco==3.8.1 (mjlab / mujoco-warp compat) while the
+    # UE plugin may run a newer mujoco. The client handles the skew itself
+    # now: the version check warns instead of raising, and an unloadable
+    # MJB falls back to building the model from the compiled XML.
     return URLabClient(
         HOST, step_port=STEP_PORT, recv_timeout_ms=recv_timeout_ms,
-        mujoco_version_check=False, local_model=False,
     )
 
 
