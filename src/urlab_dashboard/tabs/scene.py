@@ -23,6 +23,7 @@ live on the Runtime tab.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -943,6 +944,10 @@ def build(parent: str) -> None:
                            default_value="(connect + run an op)")
 
 
+# Live outliner poll worker; at most one in flight (see tick()).
+_poll_thread: Optional[threading.Thread] = None
+
+
 def tick() -> None:
     """Per-frame work for the Scene tab. Auto-polls list_actors at
     ``STATE.scene_tab.poll_interval_s`` cadence when the user hasn't disabled it
@@ -977,5 +982,19 @@ def tick() -> None:
     now = time.monotonic()
     if (now - STATE.scene_tab.last_poll_monotonic) < STATE.scene_tab.poll_interval_s:
         return
+    # Poll on a one-shot worker thread, never on the render thread. The
+    # RPC shares the transport's REQ-socket lock with every other caller
+    # (begin_pie holds it for up to ~35s; list_actors itself waits on a
+    # game-thread hop that crawls during PIE), and a blocking call here
+    # wedges the entire UI for the duration. dpg setters are thread-safe
+    # (the status-pill poller already runs on a background thread). The
+    # is_alive guard doubles as the no-overlap gate: while a poll is
+    # blocked on the socket or server, no new one is queued behind it.
+    global _poll_thread
+    if _poll_thread is not None and _poll_thread.is_alive():
+        return
     STATE.scene_tab.last_poll_monotonic = now
-    _refresh_outliner_now()
+    _poll_thread = threading.Thread(
+        target=_refresh_outliner_now, name="URLabOutlinerPoll", daemon=True,
+    )
+    _poll_thread.start()
