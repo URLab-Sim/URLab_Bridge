@@ -51,13 +51,8 @@ def on_connect(_s=None, _a=None) -> None:
     port = int(dpg.get_value("port_input") or STATE.step_port)
     mode_str = dpg.get_value("connect_mode_combo") or "auto"
     try:
-        # TEMP: bypass the exact-string MuJoCo version check + skip the
-        # cross-version MJB load so the dashboard connects to an editor built
-        # from a newer (e.g. main-HEAD 3.10.0) MuJoCo than the bridge venv
-        # pins (3.8.1). Remove once the version check is relaxed to a warning.
         STATE.client = URLabClient(host, step_mode=mode_str, step_port=port,
-                                    recv_timeout_ms=5000,
-                                    mujoco_version_check=False, local_model=False)
+                                    recv_timeout_ms=5000)
         STATE.client.connect()
         STATE.host, STATE.step_port = host, port
         log(f"connected to {host}:{port} session={STATE.client.session_id} "
