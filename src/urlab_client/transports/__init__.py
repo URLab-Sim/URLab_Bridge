@@ -22,6 +22,45 @@ from __future__ import annotations
 import struct
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Mapping, Optional, Tuple
+from urllib.parse import urlparse
+
+
+# Hosts that mean "bind on every interface" on the server side. A SUB/REQ
+# socket cannot connect to any of these; they must be rewritten to the host
+# the RPC channel actually reached the server on.
+_BIND_WILDCARD_HOSTS = frozenset({"0.0.0.0", "*", "::", ""})
+
+
+def resolve_endpoint(advertised: str, rpc_address: str) -> str:
+    """Rewrite a server-advertised bind endpoint into a connectable one.
+
+    UE advertises camera / stream endpoints in *bind* form (``tcp://0.0.0.0:NNNN``
+    or ``tcp://*:NNNN``), which a subscriber cannot connect to. Substitute the
+    host the RPC channel is already talking to (``rpc_address``), keeping the
+    advertised port. An endpoint that already names a concrete host is returned
+    unchanged, so this is safe to apply unconditionally in tooling.
+
+    ``rpc_address`` is the ``tcp://host`` (optionally with a port) the client
+    used for its RPC socket; only its host is used.
+    """
+    if not advertised:
+        return advertised
+    adv = urlparse(advertised.replace("tcp://", "http://", 1))
+    host = adv.hostname
+    port = adv.port
+    if port is None:
+        # No parseable port -- take the trailing ":NNNN" and treat the rest as host.
+        head, _, tail = advertised.rpartition(":")
+        try:
+            port = int(tail)
+        except ValueError:
+            return advertised
+        host = head.replace("tcp://", "", 1)
+    if host is not None and host not in _BIND_WILDCARD_HOSTS:
+        return advertised
+    rpc = urlparse(rpc_address.replace("tcp://", "http://", 1))
+    rpc_host = rpc.hostname or rpc_address.replace("tcp://", "", 1).split(":", 1)[0]
+    return f"tcp://{rpc_host}:{port}"
 
 
 SnapshotCallback = Callable[[Mapping[str, Any]], None]
@@ -200,4 +239,5 @@ __all__ = [
     "Transport",
     "make_transport",
     "parse_camera_frame",
+    "resolve_endpoint",
 ]

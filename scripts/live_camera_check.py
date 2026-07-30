@@ -51,8 +51,8 @@ def print_cameras(client) -> List[str]:
     _log("=" * 70)
     _log(f"DISCOVERED CAMERAS ({len(cams)}):")
     for loc, name, v in cams:
-        ep = getattr(v, "_zmq_endpoint", None)
-        topic = getattr(v, "_zmq_topic", None)
+        ep = v.zmq_endpoint
+        topic = v.zmq_topic
         _log(f"  {loc:>16}  name={name!r}")
         _log(f"  {'':>16}  mode={v.mode} res={v.resolution} zmq_ep={ep} topic={topic!r}")
     _log("=" * 70)

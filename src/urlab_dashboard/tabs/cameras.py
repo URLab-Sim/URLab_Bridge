@@ -25,8 +25,6 @@ and scripts/diag_cv_view.py for the diagnosis.
 
 from __future__ import annotations
 
-import os
-import time
 from typing import Dict, Optional
 
 import cv2
@@ -39,12 +37,6 @@ from urlab_client.enums import CameraMode
 
 
 _CAMERA_VIEWER_MAX = 480  # cv2 window edge, px
-
-# Temporary latency diagnostic: set URLAB_CAM_DIAG=1 to print, once per second,
-# the true content age (now - UE capture time) of the probe camera plus the
-# per-tick conversion+imshow cost.
-_DIAG = os.environ.get("URLAB_CAM_DIAG") == "1"
-_diag_last = 0.0
 
 
 def _collect_views() -> Dict[str, URLabCameraView]:
@@ -187,10 +179,6 @@ def build(parent: str) -> None:
 def tick() -> None:
     if not STATE.is_connected() or not _enabled() or not STATE.cam_textures:
         return
-    global _diag_last
-    t0 = time.monotonic() if _DIAG else 0.0
-    probe_content_ms = float("nan")
-    n_shown = 0
     for key, meta in STATE.cam_textures.items():
         view = None
         owner, _, cam = key.partition("/")
@@ -202,8 +190,6 @@ def tick() -> None:
                 view = art.cameras.get(cam)
         if view is None:
             continue
-        if _DIAG and n_shown == 0 and view.capture_unix_time is not None:
-            probe_content_ms = (time.time() - view.capture_unix_time) * 1000.0
         # Skip cameras with no new frame -- the window still shows the last one.
         if view.frame_count == meta["last_count"]:
             continue
@@ -212,13 +198,5 @@ def tick() -> None:
             continue
         cv2.imshow(key, bgr)
         meta["last_count"] = view.frame_count
-        n_shown += 1
     # Single GUI pump per tick drives every window's repaint.
     cv2.waitKey(1)
-    if _DIAG:
-        now = time.monotonic()
-        if now - _diag_last >= 1.0:
-            _diag_last = now
-            print(f"[camdiag] tick={((now - t0) * 1000.0):5.1f}ms  "
-                  f"shown={n_shown}  CONTENT_AGE={probe_content_ms:6.0f}ms",
-                  flush=True)

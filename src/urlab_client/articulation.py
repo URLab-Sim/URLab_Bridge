@@ -211,10 +211,23 @@ class URLabCameraView:
         # Stash the per-camera ZMQ endpoint + topic from the handshake so
         # the streaming SUB threads can subscribe in free-running mode.
         # These fields are not part of the dataclass schema (they're
-        # implementation details for the SUB plumbing).
+        # implementation details for the SUB plumbing); read them through the
+        # `zmq_endpoint` / `zmq_topic` properties.
         view._zmq_endpoint = payload.get("zmq_endpoint")
         view._zmq_topic = payload.get("zmq_topic")
         return view
+
+    @property
+    def zmq_endpoint(self) -> Optional[str]:
+        """Server-advertised (bind-form) ZMQ endpoint for this camera's stream,
+        or None before streaming is enabled. Resolve it against the client's
+        RPC address with ``transports.resolve_endpoint`` before connecting."""
+        return getattr(self, "_zmq_endpoint", None)
+
+    @property
+    def zmq_topic(self) -> Optional[str]:
+        """ZMQ SUB topic this camera publishes its frames on, or None."""
+        return getattr(self, "_zmq_topic", None)
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +763,7 @@ class URLabArticulation(URLabEntity):
 
         # ROS-Twist-aligned input: linear xyz + angular xyz + bitfield of
         # active discrete actions. Populated per step from the
-        # `per_articulation[prefix]` reply when UE has a UMjTwistController
+        # `arts[prefix]` reply block when UE has a UMjTwistController
         # attached (auto-spawned on AMjArticulation today). Stays zero
         # otherwise. Use the `twist` property for a flat 6-vec.
         self.twist_linear: np.ndarray = np.zeros(3, dtype=np.float64)
@@ -1181,7 +1194,7 @@ class URLabArticulation(URLabEntity):
     # -- refresh from step reply -----------------------------------------
 
     def _apply_step_reply(self, block: Mapping[str, Any]) -> None:
-        """Populate local views from a `per_articulation[prefix]` reply block."""
+        """Populate local views from an `arts[prefix]` reply block."""
         # Do NOT write reply ctrl back into self.ctrl_array. ctrl_array is
         # the user's outgoing send buffer (set via set_ctrl()); echoing
         # UE's d->ctrl into it creates a feedback loop in live

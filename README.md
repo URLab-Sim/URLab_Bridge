@@ -9,22 +9,29 @@ Run pretrained locomotion policies, visualize joint states and camera streams, o
 ```bash
 # Recommended (uv)
 cd urlab_bridge
-uv sync                          # core deps (ZMQ, NumPy, OpenCV, DearPyGui)
+uv sync                          # core client deps (ZMQ, NumPy, MuJoCo)
+
+# Dashboard (joint/sensor/camera viewer, actuator control):
+uv sync --extra ui                # + DearPyGui, OpenCV
 
 # To run policies (optional):
-uv sync --extra policy            # + PyTorch, ONNX, etc.
-uv pip install -e ./RoboJuDo     # policy framework (bundled submodule)
+uv sync --extra robojudo          # + RoboJuDo (bundled submodule), PyTorch, ONNX, ...
 ```
 
-The dashboard (joints, sensors, cameras, actuator control) works without the policy extras.
-RoboJuDo is only needed if you want to run neural-network policies.
+The extras are additive: `uv sync --extra ui --extra robojudo` installs both.
+The RoboJuDo submodule is wired in via `[tool.uv.sources]`, so the `robojudo`
+extra installs it editable for you -- do NOT `pip install -e ./RoboJuDo`
+separately (the next `uv sync` would drop it).
+
+The dashboard works without the policy extras; RoboJuDo is only needed to run
+neural-network policies.
 
 Requires Python 3.11+.
 
 ## Quick Start
 
 ```bash
-# Launch the dashboard (joint/sensor/camera viewer, actuator control, optional policy runner)
+# Launch the dashboard (needs the `ui` extra: uv sync --extra ui)
 uv run urlab-ui
 
 # Run a specific policy headless
@@ -108,15 +115,6 @@ URLab publishes binary-packed data over ZeroMQ PUB/SUB sockets. All topics are p
 - **State socket** (default `tcp://127.0.0.1:5555`): joints + sensors at up to 1000 Hz.
 - **Control socket** (default `tcp://127.0.0.1:5556`): policy sends target positions.
 - **Camera socket** (default `tcp://127.0.0.1:5558`): high-bandwidth image stream on a separate socket.
-
-## ROS 2 Bridge
-
-`urlab_tools.ros2_broadcaster` republishes ZMQ streams as standard ROS 2 topics (JointState, Image, Float64MultiArray). Requires a sourced ROS 2 workspace (Humble/Jazzy).
-
-```bash
-source /opt/ros/humble/setup.bash
-uv run python -m urlab_tools.ros2_broadcaster
-```
 
 ## License
 

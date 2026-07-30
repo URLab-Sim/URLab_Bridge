@@ -518,6 +518,118 @@ def test_rpc_timeout_when_server_silent(msgpack_mod, tmp_path):
         os.close(fd_rep)
 
 
+from urlab_client.transports import Transport as _Transport
+
+
+class _RecordingFallback(_Transport):
+    """Minimal fallback that records requests and returns a canned reply."""
+
+    def __init__(self, reply=None):
+        self.sent = []
+        self._reply = reply or {"op": "fallback_ok"}
+
+    def rpc(self, req, *, recv_timeout_ms=None):
+        self.sent.append((dict(req), recv_timeout_ms))
+        return self._reply
+
+    def start_state_stream(self, on_snapshot):
+        pass
+
+    def stop_state_stream(self):
+        pass
+
+    def start_camera_stream(self, *a, **kw):
+        pass
+
+    def stop_camera_streams(self):
+        pass
+
+    def close(self, **kw):
+        pass
+
+
+def test_timeout_on_mutating_op_raises_not_resend(msgpack_mod, tmp_path):
+    """A SHM timeout on a mutating op (step) must NOT be transparently resent
+    over the fallback -- the already-signalled request could still execute on a
+    slow-but-alive UE, so a resend would double-step. It raises instead."""
+    from urlab_client.errors import URLabTimeoutError
+
+    req_path = os.path.join(str(tmp_path), "req.shm")
+    rep_path = os.path.join(str(tmp_path), "rep.shm")
+    fd_req = _create_state_shm(req_path, 1024, 2)
+    fd_rep = _create_state_shm(rep_path, 1024, 2)
+    fallback = _RecordingFallback()
+    try:
+        transport = ShmTransport(
+            str(tmp_path), fallback=fallback,
+            poll_interval_s=0.001, open_timeout_s=2.0, rpc_timeout_s=0.3,
+        )
+        try:
+            with pytest.raises(URLabTimeoutError):
+                transport.rpc({"op": "step", "n_steps": 1})
+        finally:
+            transport.close()
+    finally:
+        os.close(fd_req)
+        os.close(fd_rep)
+    # The mutating op was never handed to the fallback.
+    assert fallback.sent == []
+
+
+def test_timeout_on_readonly_op_falls_back(msgpack_mod, tmp_path):
+    """A read-only op (meta) is idempotent, so a SHM timeout may transparently
+    retry it over the fallback, forwarding the caller's recv_timeout_ms."""
+    req_path = os.path.join(str(tmp_path), "req.shm")
+    rep_path = os.path.join(str(tmp_path), "rep.shm")
+    fd_req = _create_state_shm(req_path, 1024, 2)
+    fd_rep = _create_state_shm(rep_path, 1024, 2)
+    fallback = _RecordingFallback({"op": "meta_ok", "ops": []})
+    try:
+        transport = ShmTransport(
+            str(tmp_path), fallback=fallback,
+            poll_interval_s=0.001, open_timeout_s=2.0, rpc_timeout_s=0.3,
+        )
+        try:
+            reply = transport.rpc({"op": "meta"}, recv_timeout_ms=300)
+        finally:
+            transport.close()
+    finally:
+        os.close(fd_req)
+        os.close(fd_rep)
+    assert reply == {"op": "meta_ok", "ops": []}
+    assert len(fallback.sent) == 1
+    assert fallback.sent[0][0]["op"] == "meta"
+    assert fallback.sent[0][1] == 300  # recv_timeout_ms forwarded
+
+
+def test_wrong_transport_reroutes_to_fallback(msgpack_mod, tmp_path):
+    """A `wrong_transport` error (EditorOnly op sent on SHM, UE never executed)
+    reroutes to the fallback, stickily, forwarding recv_timeout_ms."""
+    fallback = _RecordingFallback({"op": "begin_pie_ok", "state": "ready"})
+    server = _ShmEchoServer(
+        msgpack_mod, str(tmp_path),
+        handler=lambda req: {"op": "error", "code": "wrong_transport",
+                             "message": "EditorOnly op on SHM"},
+    )
+    try:
+        transport = ShmTransport(
+            str(tmp_path), fallback=fallback,
+            poll_interval_s=0.0005, open_timeout_s=2.0, rpc_timeout_s=2.0,
+        )
+        try:
+            reply = transport.rpc({"op": "begin_pie"}, recv_timeout_ms=9000)
+            # Sticky: a second call skips SHM entirely.
+            reply2 = transport.rpc({"op": "begin_pie"})
+        finally:
+            transport.close()
+    finally:
+        server.close()
+    assert reply == {"op": "begin_pie_ok", "state": "ready"}
+    assert reply2 == {"op": "begin_pie_ok", "state": "ready"}
+    assert len(fallback.sent) == 2
+    assert fallback.sent[0][1] == 9000  # recv_timeout_ms forwarded on reroute
+
+
 def test_rpc_per_call_timeout_overrides_default(msgpack_mod, tmp_path):
     """ShmTransport.rpc(recv_timeout_ms=...) overrides the constructor
     default for that single call. Constructor default is very long
