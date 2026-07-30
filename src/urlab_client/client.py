@@ -222,6 +222,35 @@ class URLabClient:
         # both acquire. Cross-thread readers must take this lock too.
         self._data_lock: threading.RLock = threading.RLock()
 
+    def attach_puppet_simulation(self, model: Any, data: Any) -> None:
+        """Use an externally owned MuJoCo simulation as the puppet source.
+
+        Call this before :meth:`connect`. The client retains the exact model
+        and data objects; ``step(n_steps=0)`` can then transmit their current
+        state without advancing physics locally.
+        """
+        if mujoco is None:
+            raise RuntimeError("mujoco not installed; puppet mode requires it")
+        if self.session_id is not None:
+            raise RuntimeError(
+                "attach_puppet_simulation must be called before connect"
+            )
+        if self.step_mode not in (StepMode.AUTO, StepMode.PUPPET):
+            raise ValueError(
+                "external simulation attachment requires puppet or auto mode"
+            )
+        if not isinstance(model, mujoco.MjModel):
+            raise TypeError("model must be a mujoco.MjModel")
+        if not isinstance(data, mujoco.MjData):
+            raise TypeError("data must be a mujoco.MjData")
+        if data.model is not model:
+            raise ValueError("data must have been created from the same model")
+
+        self.model = model
+        self.data = data
+        self.local_model = False
+        self.step_mode = StepMode.PUPPET
+
     # -- transport --------------------------------------------------------
 
     def _rpc(
