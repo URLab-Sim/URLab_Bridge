@@ -282,6 +282,7 @@ class PolicyRunner:
                 advance()
 
     def run(self, num_steps: Optional[int] = None, hold_default: bool = False) -> None:
+        self.client.runtime.claim_control(self.art.prefix)
         i = 0
         while num_steps is None or i < num_steps:
             self.step(hold_default=hold_default)

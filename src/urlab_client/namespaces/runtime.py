@@ -513,3 +513,37 @@ class _RuntimeNamespace(_RpcNamespace):
             "get_contacts", payload, expected_op="get_contacts_ok",
         )
         return _contacts_result_from_wire(reply)
+
+    def claim_control(
+        self, articulation: str, *, ttl_s: float = 0.0, force: bool = False
+    ) -> str:
+        """Claim exclusive write access to an articulation's actuators.
+
+        Returns the owner id (this client's session-scoped source string).
+        ``ttl_s`` is the lease lifetime in seconds; 0 means indefinite
+        (held until ``release_control`` or disconnect). ``force=True``
+        steals the claim from the current owner.
+
+        Raises ``URLabRPCError`` with code ``control_claimed`` when the
+        articulation is already owned by another client.
+        """
+        reply = self._client._rpc(
+            "claim_control",
+            {"articulation": str(articulation), "ttl_s": float(ttl_s),
+             "force": bool(force)},
+            expected_op="claim_control_ok",
+        )
+        return str(reply.get("owner", ""))
+
+    def release_control(self, articulation: str) -> None:
+        """Release a claim on an articulation's actuators.
+
+        No-op when the articulation isn't claimed. Raises
+        ``URLabRPCError`` with code ``not_control_owner`` when another
+        client owns it.
+        """
+        self._client._rpc(
+            "release_control",
+            {"articulation": str(articulation)},
+            expected_op="release_control_ok",
+        )

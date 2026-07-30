@@ -681,6 +681,9 @@ if HAS_ROBOJUDO:
                 len(self.art.sensors),
             )
 
+            self.client.runtime.claim_control(self.prefix)
+            logger.info("URLabRoboJuDoEnv: claimed control of '%s'", self.prefix)
+
             self._dof_to_joint: List[Optional[str]] = []
             self._dof_to_actuator: List[Optional[str]] = []
             self._build_dof_mapping()
