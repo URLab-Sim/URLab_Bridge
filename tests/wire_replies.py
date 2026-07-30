@@ -290,7 +290,7 @@ def step_ok(*, time: float = 0.0, step: int = 0,
         "op": "step_ok",
         "time": float(time),
         "step": int(step),
-        "per_articulation": dict(per_articulation or {}),
+        "arts": dict(per_articulation or {}),
     }
     if sim_time is not None:
         out["sim_time"] = dict(sim_time)
