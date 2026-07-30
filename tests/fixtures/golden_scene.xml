@@ -11,6 +11,7 @@
   coverage can land in a follow-up test once the importer splits.
 -->
 <mujoco model="urlab_golden_scene">
+    <compiler angle="radian"/>
     <option timestep="0.002" integrator="implicitfast"/>
 
     <worldbody>

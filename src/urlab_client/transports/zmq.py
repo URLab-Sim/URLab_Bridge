@@ -19,11 +19,21 @@ from __future__ import annotations
 import logging
 import threading
 from typing import Any, Dict, Mapping, Optional, Tuple
-from urllib.parse import urlparse
 
-from . import FrameCallback, SnapshotCallback, Transport, parse_camera_frame
+from . import (
+    FrameCallback,
+    SnapshotCallback,
+    Transport,
+    parse_camera_frame,
+    resolve_endpoint,
+)
+from ..errors import URLabTimeoutError
 
 logger = logging.getLogger(__name__)
+
+# Backoff bounds for stream-loop reconnection after a socket error.
+_STREAM_RECONNECT_MIN_S = 0.25
+_STREAM_RECONNECT_MAX_S = 5.0
 
 try:  # pragma: no cover - trivial import guard
     import msgpack  # type: ignore
@@ -117,6 +127,10 @@ class ZmqTransport(Transport):
         # Serialise: REQ sockets aren't thread-safe, and concurrent use
         # from the user thread + a UI tick thread crashed libzmq's
         # Windows signaler (signaler.cpp:345 WSAECONNRESET assert).
+        effective_timeout_ms = (
+            int(recv_timeout_ms) if recv_timeout_ms is not None
+            else self._recv_timeout_ms
+        )
         with self._sock_lock:
             self._ensure_socket()
             try:
@@ -128,6 +142,17 @@ class ZmqTransport(Transport):
                 finally:
                     if recv_timeout_ms is not None and self._socket is not None:
                         self._socket.setsockopt(zmq.RCVTIMEO, self._recv_timeout_ms)
+            except zmq.Again as exc:
+                # Recv timed out. Normalise to URLabTimeoutError so callers get
+                # the same exception on both transports (SHM raises it too)
+                # instead of a raw zmq.error.Again leaking through. The REQ
+                # socket is in EFSM after a missed recv; reset it for the next call.
+                self._reset_socket()
+                raise URLabTimeoutError(
+                    f"RPC {request.get('op')!r} over ZMQ",
+                    waited_s=effective_timeout_ms / 1000.0,
+                    op=request.get("op"),
+                ) from exc
             except Exception:
                 # A REQ socket is unusable after send/recv error; reset so the
                 # next call gets a clean retry.
@@ -169,38 +194,57 @@ class ZmqTransport(Transport):
     def _state_loop(self, on_snapshot: SnapshotCallback) -> None:
         if zmq is None or msgpack is None:
             return
+        assert self._state_stop is not None
         # Use the transport's own context (set up in _ensure_socket).
         if self._ctx is None:
             self._ctx = zmq.Context()
-        sock = self._ctx.socket(zmq.SUB)
-        sock.setsockopt(zmq.LINGER, 0)
-        try:
-            sock.connect(f"{self.address}:{self.state_port}")
-            sock.setsockopt(zmq.SUBSCRIBE, b"state/full")
-            sock.setsockopt(zmq.RCVTIMEO, 200)
-            assert self._state_stop is not None
-            while not self._state_stop.is_set():
-                try:
-                    sock.recv()  # topic frame, discard
-                    payload = sock.recv()  # msgpack snapshot
-                except zmq.Again:
-                    continue
-                except Exception:
-                    break
-                try:
-                    snap = msgpack.unpackb(payload, raw=False, strict_map_key=False)
-                except Exception as exc:
-                    logger.debug("state/full decode failed: %s", exc)
-                    continue
-                try:
-                    on_snapshot(snap)
-                except Exception as exc:  # pragma: no cover - callback-defensive
-                    logger.debug("state snapshot callback raised: %s", exc)
-        finally:
+        backoff = _STREAM_RECONNECT_MIN_S
+        # Outer loop rebuilds the SUB socket after a fatal recv error so a
+        # transient publisher/context hiccup doesn't kill the stream for the
+        # rest of the session (the old code broke out silently). Every exit
+        # is logged so a dead stream is never invisible.
+        while not self._state_stop.is_set():
+            sock = self._ctx.socket(zmq.SUB)
+            sock.setsockopt(zmq.LINGER, 0)
             try:
-                sock.close(linger=0)
-            except Exception:
-                pass
+                sock.connect(f"{self.address}:{self.state_port}")
+                sock.setsockopt(zmq.SUBSCRIBE, b"state/full")
+                sock.setsockopt(zmq.RCVTIMEO, 200)
+                while not self._state_stop.is_set():
+                    try:
+                        sock.recv()  # topic frame, discard
+                        payload = sock.recv()  # msgpack snapshot
+                    except zmq.Again:
+                        # Idle timeout is the healthy path; a successful recv
+                        # resets the reconnect backoff.
+                        continue
+                    backoff = _STREAM_RECONNECT_MIN_S
+                    try:
+                        snap = msgpack.unpackb(
+                            payload, raw=False, strict_map_key=False
+                        )
+                    except Exception as exc:
+                        logger.debug("state/full decode failed: %s", exc)
+                        continue
+                    try:
+                        on_snapshot(snap)
+                    except Exception as exc:  # pragma: no cover - callback-defensive
+                        logger.debug("state snapshot callback raised: %s", exc)
+            except Exception as exc:
+                logger.warning(
+                    "ZmqTransport state stream error (%s); reconnecting in %.2fs",
+                    exc, backoff,
+                )
+            finally:
+                try:
+                    sock.close(linger=0)
+                except Exception:
+                    pass
+            if self._state_stop.is_set():
+                break
+            self._state_stop.wait(backoff)
+            backoff = min(backoff * 2.0, _STREAM_RECONNECT_MAX_S)
+        logger.debug("ZmqTransport state stream loop exited")
 
     # -- camera streams ---------------------------------------------------
 
@@ -247,64 +291,67 @@ class ZmqTransport(Transport):
             return
         if self._ctx is None:
             self._ctx = zmq.Context()
-        sock = self._ctx.socket(zmq.SUB)
-        sock.setsockopt(zmq.LINGER, 0)
-        # Bound the inbound queue: a live camera feed only cares about the
-        # newest frame, so don't let a slow consumer accumulate seconds of
-        # stale frames in the SUB queue (that's what made the dashboard lag
-        # ~3s). HWM must be set before connect. Combined with the drain-to-
-        # latest below, the delivered frame stays fresh regardless of how fast
-        # the consumer renders.
-        sock.setsockopt(zmq.RCVHWM, 4)
-        try:
-            # Endpoint from the handshake is "tcp://*:NNNN" (server bind
-            # form). Connect to the same host the RPC is targeting on the
-            # advertised port.
-            connect_ep = f"{self.address}:{self._port_from_endpoint(endpoint)}"
-            sock.connect(connect_ep)
-            sock.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
-            sock.setsockopt(zmq.RCVTIMEO, 200)
-            stop_ev = self._cam_stops[key]
-            while not stop_ev.is_set():
-                try:
-                    sock.recv()         # topic frame, discard
-                    payload = sock.recv()  # [meta(32)][pixels]
-                except zmq.Again:
-                    continue
-                except Exception:
-                    break
-                # Drain any backlog and keep only the freshest frame, so a slow
-                # consumer (heavy UI) never falls behind the publisher. Multipart
-                # delivery is atomic, so a NOBLOCK topic recv guarantees its
-                # payload is also available.
-                while True:
-                    try:
-                        sock.recv(flags=zmq.NOBLOCK)            # newer topic
-                        payload = sock.recv(flags=zmq.NOBLOCK)  # newer payload
-                    except zmq.Again:
-                        break
-                    except Exception:
-                        break
-                pixels, frame_id, sim_time, capture_time = parse_camera_frame(payload)
-                try:
-                    on_frame(pixels, frame_id, sim_time, capture_time)
-                except Exception as exc:  # pragma: no cover - callback-defensive
-                    logger.debug("camera frame callback raised: %s", exc)
-        finally:
+        stop_ev = self._cam_stops[key]
+        # Endpoint from the handshake is a bind form ("tcp://*:NNNN" /
+        # "tcp://0.0.0.0:NNNN"). Rewrite it to the host the RPC is targeting;
+        # a concrete advertised host is preserved.
+        connect_ep = resolve_endpoint(endpoint, self.address)
+        backoff = _STREAM_RECONNECT_MIN_S
+        # Rebuild the SUB socket after a fatal recv error rather than dying
+        # silently, and log every loop exit.
+        while not stop_ev.is_set():
+            sock = self._ctx.socket(zmq.SUB)
+            sock.setsockopt(zmq.LINGER, 0)
+            # Bound the inbound queue: a live camera feed only cares about the
+            # newest frame, so don't let a slow consumer accumulate seconds of
+            # stale frames in the SUB queue (that's what made the dashboard lag
+            # ~3s). HWM must be set before connect. Combined with the drain-to-
+            # latest below, the delivered frame stays fresh regardless of how
+            # fast the consumer renders.
+            sock.setsockopt(zmq.RCVHWM, 4)
             try:
-                sock.close(linger=0)
-            except Exception:
-                pass
-
-    @staticmethod
-    def _port_from_endpoint(endpoint: str) -> int:
-        # Endpoint looks like "tcp://*:5558" or "tcp://127.0.0.1:5558".
-        # urlparse needs a scheme it understands; substitute one.
-        parsed = urlparse(endpoint.replace("tcp://", "http://"))
-        if parsed.port is not None:
-            return parsed.port
-        # Fallback: take the trailing ":NNNN".
-        return int(endpoint.rsplit(":", 1)[-1])
+                sock.connect(connect_ep)
+                sock.setsockopt(zmq.SUBSCRIBE, topic.encode("utf-8"))
+                sock.setsockopt(zmq.RCVTIMEO, 200)
+                while not stop_ev.is_set():
+                    try:
+                        sock.recv()         # topic frame, discard
+                        payload = sock.recv()  # [meta][pixels]
+                    except zmq.Again:
+                        continue
+                    backoff = _STREAM_RECONNECT_MIN_S
+                    # Drain any backlog and keep only the freshest frame, so a
+                    # slow consumer (heavy UI) never falls behind the publisher.
+                    # Multipart delivery is atomic, so a NOBLOCK topic recv
+                    # guarantees its payload is also available.
+                    while True:
+                        try:
+                            sock.recv(flags=zmq.NOBLOCK)            # newer topic
+                            payload = sock.recv(flags=zmq.NOBLOCK)  # newer payload
+                        except zmq.Again:
+                            break
+                    pixels, frame_id, sim_time, capture_time = parse_camera_frame(
+                        payload
+                    )
+                    try:
+                        on_frame(pixels, frame_id, sim_time, capture_time)
+                    except Exception as exc:  # pragma: no cover - callback-defensive
+                        logger.debug("camera frame callback raised: %s", exc)
+            except Exception as exc:
+                logger.warning(
+                    "ZmqTransport camera %s/%s stream error (%s); "
+                    "reconnecting in %.2fs", key[0], key[1], exc, backoff,
+                )
+            finally:
+                try:
+                    sock.close(linger=0)
+                except Exception:
+                    pass
+            if stop_ev.is_set():
+                break
+            stop_ev.wait(backoff)
+            backoff = min(backoff * 2.0, _STREAM_RECONNECT_MAX_S)
+        logger.debug("ZmqTransport camera %s/%s stream loop exited", key[0], key[1])
 
     # -- lifecycle --------------------------------------------------------
 

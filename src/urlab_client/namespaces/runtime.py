@@ -85,7 +85,11 @@ class _RuntimeNamespace(_RpcNamespace):
         - ``{"zmq": bool, "shm": bool}`` — per-transport
 
         Returns ``{canonical: CameraStreamInfo}`` (streaming/zmq/shm/
-        zmq_endpoint/zmq_topic) so you know exactly where to subscribe.
+        zmq_endpoint/zmq_topic). Note ``zmq_endpoint`` is the server *bind*
+        form (e.g. ``tcp://0.0.0.0:NNNN``) and is not directly connectable;
+        pass it through :func:`urlab_client.transports.resolve_endpoint`
+        (against the client's RPC address) before subscribing. ``URLabClient``
+        does this for you; only raw tooling needs to.
         """
         wire: Dict[str, Any] = {}
         for key, val in cameras.items():
@@ -160,7 +164,22 @@ class _RuntimeNamespace(_RpcNamespace):
             "set_camera_delay", {"cameras": wire},
             expected_op="set_camera_delay_ok",
         )
-        return dict(reply.get("cameras") or {})
+        applied = dict(reply.get("cameras") or {})
+        # Track the applied delay per camera so the client's "fresh" wait paths
+        # (get_camera(fresh=True) / step(camera_query="fresh")) know not to block
+        # on a frame that can never reveal for the just-stepped state under a
+        # sim-clock delay. Fall back to the requested value if the server did
+        # not echo delay_s.
+        for name, requested in cameras.items():
+            echoed = applied.get(name)
+            if isinstance(echoed, Mapping) and "delay_s" in echoed:
+                delay = float(echoed["delay_s"])
+            elif isinstance(requested, Mapping):
+                delay = float(requested.get("delay_s", 0.0))
+            else:
+                delay = float(requested)
+            self._client._camera_applied_delay[str(name)] = delay
+        return applied
 
     def set_sim_speed(self, percent: float) -> float:
         reply = self._client._rpc(

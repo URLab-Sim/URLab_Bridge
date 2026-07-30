@@ -36,6 +36,7 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple
 
 from . import FrameCallback, SnapshotCallback, Transport, parse_camera_frame
+from ..errors import URLabTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,28 @@ try:  # pragma: no cover - trivial import guard
     import msgpack  # type: ignore
 except ImportError:  # pragma: no cover
     msgpack = None  # noqa: N816
+
+# Ops whose reply we may transparently fetch over the ZMQ fallback after a
+# SHM timeout. These are read-only / idempotent, so a slow-but-alive UE
+# servicing the already-signalled SHM request in addition to the fallback
+# request has no side effect beyond wasted work. Any op NOT listed here is
+# treated as mutating: a SHM timeout on it raises rather than silently
+# re-executing it (a resend would double-step, double-reset, double-spawn).
+# This is a conservative allowlist -- an unknown op defaults to "mutating".
+_RETRY_SAFE_OPS = frozenset({
+    "hello",
+    "meta",
+    "op_status",
+    "pie_status",
+    "get_contacts",
+    "read_mocap_pose",
+    "list_keyframes",
+    "list_actors",
+    "list_blueprints",
+    "snapshot",
+    "get_actor_bounds",
+    "actor_hierarchy",
+})
 
 # --- Windows kernel events --------------------------------------------------
 # UE creates two named events per session (req_ready, rep_ready). The bridge
@@ -320,6 +343,18 @@ class ShmTransport(Transport):
                     f"SHM request payload {len(payload)}B exceeds slot stride "
                     f"{self._req_stride}B"
                 )
+            # Re-snapshot the reply sequence immediately before publishing the
+            # request. Reply correlation here is "any reply newer than this
+            # snapshot", so a late reply from a PRIOR (timed-out or fallback)
+            # RPC must not be mistaken for this call's answer. Without this
+            # re-snap the stale reply's sequence bump would satisfy the check
+            # below and the two calls' payloads would swap undetected.
+            # A robust fix needs a request-id echoed by UE in the reply slot
+            # (plugin coordination); until that field exists this single-flight
+            # re-snapshot under `_rpc_lock` is the correct minimum.
+            self._last_rep_seq = struct.unpack_from(
+                "<Q", self._rep_mm, SHM_OFF_SEQUENCE
+            )[0]
             cur_latest = struct.unpack_from(
                 "<I", self._req_mm, SHM_OFF_LATEST_IDX
             )[0]
@@ -336,7 +371,10 @@ class ShmTransport(Transport):
             struct.pack_into(
                 "<Q", self._req_mm, SHM_OFF_SEQUENCE, seq_before + 1
             )
-            self._req_mm.flush()
+            # No mmap.flush(): the region is shared RAM (both processes map the
+            # same file), so writes are visible to UE without an msync to the
+            # backing file. Cross-process ordering is the seqlock plus UE's
+            # acquire load on the sequence, not a file flush.
 
             # Wake UE's worker. Auto-reset event self-clears after one waiter.
             if self._use_kernel_events and self._req_event:
@@ -397,19 +435,29 @@ class ShmTransport(Transport):
                         raise RuntimeError(
                             f"non-dict SHM reply: {type(reply).__name__}"
                         )
-                    # UE writes a synthetic reply_too_large error when the
-                    # real reply doesn't fit in the slot. Route this op
-                    # through the fallback now and on subsequent calls.
+                    # Two synthetic UE errors mean "this op cannot travel over
+                    # SHM": `reply_too_large` (the real reply won't fit the
+                    # slot -- UE DID execute it) and `wrong_transport` (an
+                    # EditorOnly op like begin_pie/stop_pie/op_status was sent
+                    # on SHM -- UE rejected it BEFORE executing). Both are
+                    # handled identically and safely: sticky-reroute the op to
+                    # the fallback and re-run it there, forwarding the caller's
+                    # recv_timeout_ms so a long editor op (30s hello refetch,
+                    # begin_pie) does not die at the fallback's default.
                     if (reply.get("op") == "error"
-                            and reply.get("code") == "reply_too_large"
+                            and reply.get("code") in ("reply_too_large",
+                                                      "wrong_transport")
                             and self._fallback is not None):
                         if op:
                             self._ops_routed_to_fallback.add(op)
                         logger.info(
-                            "ShmTransport: op=%r too large for slot; "
-                            "routing through fallback transport", op,
+                            "ShmTransport: op=%r not serviceable over SHM "
+                            "(%s); rerouting through fallback transport",
+                            op, reply.get("code"),
                         )
-                        return self._fallback.rpc(request)
+                        return self._fallback.rpc(
+                            request, recv_timeout_ms=recv_timeout_ms
+                        )
                     return reply
                 # Reply not yet ready. With kernel events the wait above
                 # already blocked for up to 50ms; fall through immediately
@@ -418,18 +466,22 @@ class ShmTransport(Transport):
                 if not (self._use_kernel_events and self._rep_event):
                     time.sleep(self._poll_interval_s)
 
-            # No reply within rpc_timeout_s. If a fallback is configured,
-            # remember to route this op through it from now on, and
-            # transparently retry this single call.
-            if self._fallback is not None:
+            # No reply within the timeout. Critical safety rule: the request
+            # was already written to the slot and signalled, so a slow-but-
+            # alive UE may still execute it. Transparently resending over ZMQ
+            # would make UE execute the op TWICE -- a double step, a double
+            # reset/set_qpos, a duplicate spawn. Only retry ops on the
+            # read-only / idempotent allowlist; everything else raises.
+            if op in _RETRY_SAFE_OPS and self._fallback is not None:
                 if op:
                     self._ops_routed_to_fallback.add(op)
                 logger.info(
-                    "ShmTransport: op=%r timed out; falling back to ZMQ", op,
+                    "ShmTransport: read-only op=%r timed out; retrying over "
+                    "fallback transport", op,
                 )
-                return self._fallback.rpc(request)
-            raise TimeoutError(
-                f"ShmTransport.rpc: no reply within {self._rpc_timeout_s}s"
+                return self._fallback.rpc(request, recv_timeout_ms=recv_timeout_ms)
+            raise URLabTimeoutError(
+                f"SHM RPC {op!r}", waited_s=effective_timeout_s, op=op,
             )
 
     def start_camera_stream(
@@ -687,7 +739,12 @@ class ShmTransport(Transport):
 
     # -- lifecycle -------------------------------------------------------
 
-    def close(self) -> None:
+    def close(self, *, close_fallback: bool = True) -> None:
+        """Stop all streams and close the RPC mappings. ``close_fallback``
+        defaults to True (the Transport contract). The client passes
+        ``close_fallback=False`` when it rebuilds the SHM transport across a
+        PIE restart and wants to carry the shared ZMQ fallback over to the
+        replacement instead of tearing it down."""
         self.stop_state_stream()
         self.stop_camera_streams()
         with self._rpc_lock:
@@ -721,5 +778,5 @@ class ShmTransport(Transport):
             if self._rep_event is not None:
                 _close_event(self._rep_event)
                 self._rep_event = None
-        if self._fallback is not None:
+        if self._fallback is not None and close_fallback:
             self._fallback.close()

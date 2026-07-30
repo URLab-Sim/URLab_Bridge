@@ -30,6 +30,12 @@ Recording and replay:
     URLabRecordingAPI  -- session record / save / clear (see client.recording)
     URLabReplayAPI     -- load / set_active / play (see client.replay)
 
+Render-farm pool:
+
+    URLabPool          -- discover / lease editor instances (same-host registry
+                          or a static multi-machine endpoint list)
+    InstanceInfo       -- one discoverable instance (host / ports / capabilities)
+
 Scene authoring:
 
     URLabAsset, URLabBlueprint, URLabSpawnHandle, URLabLightHandle
@@ -105,12 +111,20 @@ from .results import (
     SceneSnapshotActor,
     SimOptions,
 )
+from .pool import (
+    InstanceInfo,
+    URLabPool,
+    default_registry_dir,
+    pid_alive,
+    read_registry,
+)
 from .scene_authoring import (
     URLabAsset,
     URLabBlueprint,
     URLabLightHandle,
     URLabSpawnHandle,
 )
+from .transports import resolve_endpoint
 
 __all__ = [
     # client + articulation
@@ -171,4 +185,12 @@ __all__ = [
     "SceneSnapshot",
     "SceneSnapshotActor",
     "SimOptions",
+    # transport helpers
+    "resolve_endpoint",
+    # render-farm pool discovery + leasing
+    "URLabPool",
+    "InstanceInfo",
+    "default_registry_dir",
+    "pid_alive",
+    "read_registry",
 ]

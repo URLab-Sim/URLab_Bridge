@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``python -m urlab_tools.ros2_broadcaster`` entry point."""
+import sys
 
-from .broadcaster import main
-
+from .cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

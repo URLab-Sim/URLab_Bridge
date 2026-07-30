@@ -269,6 +269,11 @@ def test_set_camera_delay_rpc(mock_step_server, base_handshake):
     assert applied["head_cam"]["clock"] == "wall"
     assert applied["head_cam"]["max_fps"] == 30.0
 
+    # Applied delay is tracked client-side so the fresh-wait paths know not to
+    # block on a frame that can never reveal under a sim-clock delay.
+    assert client._camera_applied_delay["wrist_cam"] == 0.05
+    assert client._camera_applied_delay["head_cam"] == 0.1
+
     # Request the server saw carries the per-camera knobs.
     sent = mock_step_server.received[1]
     assert sent["op"] == "set_camera_delay"
@@ -294,6 +299,24 @@ def test_set_camera_delay_bare_float(mock_step_server, base_handshake):
         client.close()
     sent = mock_step_server.received[1]
     assert sent["cameras"]["wrist_cam"] == 0.08
+
+
+def test_resolve_endpoint_rewrites_bind_wildcard():
+    """A bind-wildcard host (0.0.0.0 / * / ::) is rewritten to the RPC host,
+    port preserved; a concrete host is left untouched."""
+    from urlab_client import resolve_endpoint
+
+    assert resolve_endpoint("tcp://0.0.0.0:5558", "tcp://127.0.0.1") == \
+        "tcp://127.0.0.1:5558"
+    assert resolve_endpoint("tcp://*:5558", "tcp://192.168.1.10:5559") == \
+        "tcp://192.168.1.10:5558"
+    assert resolve_endpoint("tcp://[::]:5558", "tcp://myhost") == \
+        "tcp://myhost:5558"
+    # A concrete advertised host is connectable already -- returned unchanged.
+    assert resolve_endpoint("tcp://10.0.0.5:5558", "tcp://127.0.0.1") == \
+        "tcp://10.0.0.5:5558"
+    # Empty / unparseable inputs degrade gracefully.
+    assert resolve_endpoint("", "tcp://127.0.0.1") == ""
 
 
 def test_recording_start_stop_save(mock_step_server, base_handshake):

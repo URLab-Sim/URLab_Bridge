@@ -12,11 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Standalone URLab tools (CLI scripts that don't fit ``urlab_policy``).
+"""URLab render-farm launcher.
 
-Today:
-
-  * :mod:`.ros2_broadcaster` -- republish URLab ZMQ streams as ROS 2
-    topics (JointState, Image, Float64MultiArray). Run with
-    ``python -m urlab_tools.ros2_broadcaster``.
+Spawn and manage a pool of Unreal editor render instances. CLI: ``urlab-farm``
+(runnable as ``python -m urlab_farm``) with ``up`` / ``down`` / ``ps``
+subcommands. Client-side pool discovery + leasing lives in
+:class:`urlab_client.URLabPool`.
 """
+
+from __future__ import annotations
+
+from .launcher import (
+    LaunchedInstance,
+    down,
+    find_editor,
+    find_project,
+    isolate_project,
+    kill_pid,
+    ps,
+    up,
+)
+
+__all__ = [
+    "LaunchedInstance",
+    "down",
+    "find_editor",
+    "find_project",
+    "isolate_project",
+    "kill_pid",
+    "ps",
+    "up",
+]

@@ -72,7 +72,7 @@ _SRC = os.path.normpath(os.path.join(_HERE, "..", "src"))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from urlab_client.transports import Transport  # noqa: E402
+from urlab_client.transports import Transport, resolve_endpoint  # noqa: E402
 from urlab_client.transports.shm import ShmTransport  # noqa: E402
 from urlab_client.transports.zmq import ZmqTransport  # noqa: E402
 
@@ -89,18 +89,29 @@ def _percentile(samples: List[float], p: float) -> float:
 
 
 def _discover_cameras(address: str) -> List[CameraSpec]:
-    """One ZMQ hello -> extract every advertised camera + its endpoint."""
+    """Handshake, ENABLE per-camera broadcast, and return the connectable
+    endpoints.
+
+    UE's ``bEnableAllCameras`` defaults off, so a camera only binds its real
+    (distinct) ZMQ port once ``set_camera_streaming`` is called; the endpoint
+    advertised in the bare handshake is a shared placeholder. We enable
+    streaming and read the bound endpoint back from that reply, then rewrite
+    its bind-wildcard host to the RPC host so a subscriber can actually connect.
+    """
     transport = ZmqTransport(address)
     try:
         reply = transport.rpc({
             "op": "hello",
             "client_version": "bench_cameras/1",
             "observations": "minimal",
+            "encoding": "msgpack",
         })
         if reply.get("op") != "hello_ok":
             raise RuntimeError(
                 f"unexpected hello reply op={reply.get('op')!r}: {reply}"
             )
+
+        discovered: Dict[str, Tuple[str, Tuple[int, int]]] = {}
         cams: List[CameraSpec] = []
         for art in reply.get("articulations", []):
             prefix = art.get("prefix", "")
@@ -108,8 +119,30 @@ def _discover_cameras(address: str) -> List[CameraSpec]:
                 endpoint = cam_info.get("zmq_endpoint", "") or ""
                 topic = cam_info.get("zmq_topic", "") or ""
                 res = cam_info.get("resolution", [0, 0]) or [0, 0]
-                cams.append((prefix, cam_name, endpoint, topic, (int(res[0]), int(res[1]))))
-        return cams
+                discovered[cam_name] = (prefix, (int(res[0]), int(res[1])))
+                cams.append((prefix, cam_name, endpoint, topic,
+                             (int(res[0]), int(res[1]))))
+
+        if not cams:
+            return cams
+
+        # Enable broadcast on every camera and use the bound endpoints/topics
+        # the reply reports (falling back to the handshake values otherwise).
+        enable = {name: {"zmq": True, "shm": True} for name in discovered}
+        stream_reply = transport.rpc({
+            "op": "set_camera_streaming",
+            "cameras": enable,
+        })
+        bound = stream_reply.get("cameras") or {}
+        resolved: List[CameraSpec] = []
+        for prefix, cam_name, endpoint, topic, wh in cams:
+            info = bound.get(cam_name) or {}
+            endpoint = info.get("zmq_endpoint") or endpoint
+            topic = info.get("zmq_topic") or topic
+            resolved.append(
+                (prefix, cam_name, resolve_endpoint(endpoint, address), topic, wh)
+            )
+        return resolved
     finally:
         transport.close()
 
@@ -127,7 +160,12 @@ def _bench_transport(
     subscribed_at = time.perf_counter()
 
     def make_cb(key: Tuple[str, str]):
-        def _cb(_pixels: bytes) -> None:
+        # Transport frame callbacks are 4-arg: (pixels, frame_id, sim_time,
+        # capture_time). A 1-arg callback raises inside the transport and every
+        # frame is silently dropped -- which is what made this bench always
+        # report 0 frames.
+        def _cb(_pixels: bytes, _frame_id=None, _sim_time=None,
+                _capture_time=None) -> None:
             t = time.perf_counter()
             with arrivals_lock:
                 if key not in first_frame_at:
