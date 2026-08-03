@@ -34,7 +34,12 @@ from .enums import (
     coerce,
     wire,
 )
-from .errors import URLabRPCError, URLabTimeoutError, URLabVersionMismatch
+from .errors import (
+    URLabPuppetDriftError,
+    URLabRPCError,
+    URLabTimeoutError,
+    URLabVersionMismatch,
+)
 from .results import StepResult
 from .namespaces.debug import _DebugNamespace
 from .namespaces.outliner import _OutlinerNamespace
@@ -122,6 +127,7 @@ class URLabClient:
         auto_promote_step_mode: bool = True,
         transport: Union[str, Transport] = "zmq",
         shm_dir: Optional[str] = None,
+        puppet_drift_check: str = "warn",
     ):
         self.address = address
         self.step_mode: StepMode = coerce(StepMode, step_mode, default=StepMode.AUTO)
@@ -131,6 +137,12 @@ class URLabClient:
         self.info_port = info_port
         self.mujoco_version_check = mujoco_version_check
         self.local_model = local_model
+        if puppet_drift_check not in ("error", "warn", "off"):
+            raise ValueError(
+                "puppet_drift_check must be 'error', 'warn' or 'off', "
+                f"got {puppet_drift_check!r}"
+            )
+        self.puppet_drift_check = puppet_drift_check
         self._recv_timeout_ms = recv_timeout_ms
         self._auto_promote_step_mode = auto_promote_step_mode
 
@@ -228,6 +240,16 @@ class URLabClient:
         Call this before :meth:`connect`. The client retains the exact model
         and data objects; ``step(n_steps=0)`` can then transmit their current
         state without advancing physics locally.
+
+        The binding is made before the URLab scene exists -- levels are
+        loaded, MJCF imported and actors spawned afterwards -- so the two
+        models can diverge between here and the first push. Every handshake
+        that carries an MJB is therefore checked against this model (see
+        ``puppet_drift_check``), including the fresh one ``sim.start``
+        absorbs once PIE is up. A mismatch cannot be repaired after the
+        fact, since a puppet step is just a raw ``qpos``/``qvel``/``ctrl``
+        vector, so it raises :class:`URLabPuppetDriftError` instead of
+        pushing state onto the wrong degrees of freedom.
         """
         if mujoco is None:
             raise RuntimeError("mujoco not installed; puppet mode requires it")
@@ -466,6 +488,83 @@ class URLabClient:
         # set_camera_streaming inside enables the per-camera broadcast.
         self._start_streaming_subs()
 
+    @staticmethod
+    def _model_layout(model: Any) -> Dict[str, Any]:
+        """The parts of a model a raw puppet state vector depends on."""
+        names = {
+            "bodies": mujoco.mjtObj.mjOBJ_BODY,
+            "joints": mujoco.mjtObj.mjOBJ_JOINT,
+            "actuators": mujoco.mjtObj.mjOBJ_ACTUATOR,
+        }
+        counts = {"bodies": model.nbody, "joints": model.njnt, "actuators": model.nu}
+        layout: Dict[str, Any] = {
+            "nq": int(model.nq),
+            "nv": int(model.nv),
+            "nu": int(model.nu),
+        }
+        for key, obj_type in names.items():
+            layout[key] = [
+                mujoco.mj_id2name(model, obj_type, i) or "" for i in range(counts[key])
+            ]
+        # Joint type/address ordering decides which slice of qpos each
+        # joint reads; a slide imported as a hinge keeps nq intact but
+        # silently reinterprets the numbers.
+        layout["jnt_type"] = [int(v) for v in model.jnt_type]
+        layout["jnt_qposadr"] = [int(v) for v in model.jnt_qposadr]
+        return layout
+
+    def _check_puppet_drift(self, mjb_bytes: bytes) -> None:
+        """Compare the server's model against the attached puppet source.
+
+        A drift cannot be repaired from here -- the state vectors are
+        already ambiguous -- so this only reports it.
+
+        Dimension mismatches always raise: a puppet step transmits exactly
+        ``nq``/``nv``/``nu`` floats, so there is no reading under which
+        differing counts are benign. Name and ordering differences follow
+        ``puppet_drift_check`` ('error' | 'warn' | 'off'), defaulting to
+        'warn' because a scene may legitimately carry bodies the source
+        model never had.
+        """
+        if self.puppet_drift_check == "off" or self.model is None:
+            return
+        try:
+            server_model, _ = _load_mjb(mjb_bytes)
+        except Exception as exc:  # unreadable MJB is not itself a drift
+            logger.warning("puppet drift check skipped: MJB unreadable (%s)", exc)
+            return
+
+        local = self._model_layout(self.model)
+        server = self._model_layout(server_model)
+        fatal: List[str] = []
+        for field in ("nq", "nv", "nu"):
+            if local[field] != server[field]:
+                fatal.append(f"{field} local={local[field]} server={server[field]}")
+        if fatal:
+            raise URLabPuppetDriftError(fatal)
+
+        differences: List[str] = []
+        for field in ("bodies", "joints", "actuators"):
+            missing = [n for n in local[field] if n and n not in set(server[field])]
+            if missing:
+                head = ", ".join(missing[:5])
+                tail = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+                differences.append(f"{field} missing server-side: {head}{tail}")
+        for field in ("jnt_type", "jnt_qposadr"):
+            if local[field] != server[field]:
+                differences.append(f"{field} ordering differs")
+
+        if not differences:
+            logger.debug("puppet drift check: server model matches attached source")
+            return
+        if self.puppet_drift_check == "warn":
+            logger.warning(
+                "puppet model drift (pushes may land on the wrong DOFs): %s",
+                "; ".join(differences),
+            )
+            return
+        raise URLabPuppetDriftError(differences)
+
     def _apply_handshake(self, reply: Mapping[str, Any]) -> None:
         """Shared entry point used by `connect()` and tests that inject
         a canned handshake without the socket round-trip."""
@@ -499,6 +598,15 @@ class URLabClient:
         mjb_bytes = reply.get("mjb")
         if self.local_model and mjb_bytes and mujoco is not None:
             self.model, self.data = _load_mjb(mjb_bytes)
+        elif mjb_bytes and mujoco is not None:
+            # An external simulation is attached (local_model=False), so the
+            # server's MJB is not adopted -- but it is exactly what a puppet
+            # push lands in, and it is the only evidence we get that the two
+            # models still agree. `attach_puppet_simulation` runs before the
+            # level is even loaded; the scene is imported, spawned and PIE'd
+            # afterwards, and `sim.start` re-absorbs a handshake describing
+            # whatever actually got built. Compare here or not at all.
+            self._check_puppet_drift(mjb_bytes)
 
         # Build articulations
         self.articulations = {}

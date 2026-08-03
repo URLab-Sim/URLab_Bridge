@@ -82,3 +82,25 @@ class URLabTimeoutError(URLabRPCError, TimeoutError):
 
 class URLabVersionMismatch(RuntimeError):
     pass
+
+
+class URLabPuppetDriftError(RuntimeError):
+    """The server's model no longer matches the attached puppet source.
+
+    Raised when a handshake (``connect`` or the fresh one ``sim.start``
+    absorbs) reports a model whose layout differs from the ``MjModel``
+    passed to :meth:`URLabClient.attach_puppet_simulation`. Puppet steps
+    transmit raw ``qpos``/``qvel``/``ctrl`` vectors that are only
+    meaningful under a matching layout, so a drift here means every
+    subsequent push is being applied to the wrong degrees of freedom.
+
+    ``differences`` lists the specific fields that diverged.
+    """
+
+    def __init__(self, differences: "list[str]") -> None:
+        self.differences = list(differences)
+        super().__init__(
+            "puppet model drift: the URLab scene does not match the attached "
+            "simulation (" + "; ".join(self.differences) + "). Re-export and "
+            "re-import the MJCF so both sides agree."
+        )

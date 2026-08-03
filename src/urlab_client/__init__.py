@@ -36,7 +36,8 @@ Scene authoring:
 
 Errors:
 
-    URLabRPCError, URLabPIEError, URLabVersionMismatch, URLabTimeoutError
+    URLabRPCError, URLabPIEError, URLabVersionMismatch, URLabTimeoutError,
+    URLabPuppetDriftError
 
 Enums:
 
@@ -76,6 +77,7 @@ from .enums import (
 )
 from .errors import (
     URLabPIEError,
+    URLabPuppetDriftError,
     URLabRPCError,
     URLabTimeoutError,
     URLabVersionMismatch,
@@ -135,6 +137,7 @@ __all__ = [
     "URLabSpawnHandle",
     # errors
     "URLabPIEError",
+    "URLabPuppetDriftError",
     "URLabRPCError",
     "URLabTimeoutError",
     "URLabVersionMismatch",
