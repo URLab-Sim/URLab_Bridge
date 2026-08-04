@@ -106,7 +106,7 @@ def test_state_stream_round_trip(msgpack_mod, tmp_path):
                 "op": "state_full",
                 "time": 1.5,
                 "step": 7,
-                "per_articulation": {"vx300s": {"qpos": [0.1, 0.2]}},
+                "arts": {"vx300s": {"qpos": [0.1, 0.2]}},
             }, use_bin_type=True)
             _publish(state_path, stride, n_buffers, payload)
             assert evt.wait(timeout=2.0), "no snapshot delivered"
@@ -120,7 +120,7 @@ def test_state_stream_round_trip(msgpack_mod, tmp_path):
     assert snap["op"] == "state_full"
     assert snap["time"] == pytest.approx(1.5)
     assert snap["step"] == 7
-    assert "vx300s" in snap["per_articulation"]
+    assert "vx300s" in snap["arts"]
 
 
 def test_state_stream_many_snapshots(msgpack_mod, tmp_path):

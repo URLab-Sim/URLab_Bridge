@@ -282,7 +282,7 @@ def actor_hierarchy_ok(*, root: Optional[Dict[str, Any]] = None,
 
 
 def step_ok(*, time: float = 0.0, step: int = 0,
-            per_articulation: Optional[Dict[str, Any]] = None,
+            arts: Optional[Dict[str, Any]] = None,
             sim_time: Optional[Dict[str, int]] = None,
             wall_time: Optional[Dict[str, int]] = None,
             **extra: Any) -> Dict[str, Any]:
@@ -290,7 +290,7 @@ def step_ok(*, time: float = 0.0, step: int = 0,
         "op": "step_ok",
         "time": float(time),
         "step": int(step),
-        "arts": dict(per_articulation or {}),
+        "arts": dict(arts or {}),
     }
     if sim_time is not None:
         out["sim_time"] = dict(sim_time)
@@ -300,13 +300,13 @@ def step_ok(*, time: float = 0.0, step: int = 0,
     return out
 
 
-def per_articulation_block(*, qpos: Optional[List[float]] = None,
+def art_block(*, qpos: Optional[List[float]] = None,
                            qvel: Optional[List[float]] = None,
                            ctrl: Optional[List[float]] = None,
                            act: Optional[List[float]] = None,
                            sensors: Optional[Dict[str, List[float]]] = None,
                            **extra: Any) -> Dict[str, Any]:
-    """One articulation's slice of a step_ok per_articulation map."""
+    """One articulation's slice of a step_ok `arts` map."""
     out: Dict[str, Any] = {
         "qpos": list(qpos or []),
         "qvel": list(qvel or []),

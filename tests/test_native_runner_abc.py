@@ -116,8 +116,8 @@ def test_native_runner_accepts_urlab_policy_abc(
         mock_step_server.replies.append(
             wr.step_ok(
                 time=0.001, step=1,
-                per_articulation={
-                    "vx300s": wr.per_articulation_block(
+                arts={
+                    "vx300s": wr.art_block(
                         qpos=[0.0, 0.0],
                         qvel=[0.0, 0.0],
                         ctrl=[0.05, 0.05],

@@ -77,12 +77,12 @@ def test_direct_step_sends_ctrl_and_absorbs_reply(mock_step_server, base_handsha
     mock_step_server.replies.append(base_handshake)
     mock_step_server.replies.append(wr.step_ok(
         time=0.01, step=1,
-        per_articulation={
-            "vx300s": wr.per_articulation_block(
+        arts={
+            "vx300s": wr.art_block(
                 qpos=[0.1, 0.2], qvel=[0.0, 0.0], ctrl=[0.5, 0.0],
                 sensors={"waist_pos": [0.1], "tip_pos": [0.1, 0.0, 0.05]},
             ),
-            "go2": wr.per_articulation_block(qpos=[0.0], qvel=[0.0], ctrl=[0.0]),
+            "go2": wr.art_block(qpos=[0.0], qvel=[0.0], ctrl=[0.0]),
         },
     ))
     client = _make_client(mock_step_server.port, step_mode="direct")
@@ -118,15 +118,15 @@ def test_twist_and_clocks_roundtrip(mock_step_server, base_handshake):
         time=0.02, step=2,
         sim_time={"sec": 0,         "nsec": 20_000_000},
         wall_time={"sec": 1745678912, "nsec": 345678901},
-        per_articulation={
-            "vx300s": wr.per_articulation_block(
+        arts={
+            "vx300s": wr.art_block(
                 qpos=[0.0, 0.0], qvel=[0.0, 0.0], ctrl=[0.0, 0.0],
                 twist={"linear":  [0.5, -0.25, 0.0],
                        "angular": [0.0, 0.0, 0.7]},
                 actions=5,
             ),
             # no twist block -- twist fields stay zero
-            "go2": wr.per_articulation_block(qpos=[0.0], qvel=[0.0], ctrl=[0.0]),
+            "go2": wr.art_block(qpos=[0.0], qvel=[0.0], ctrl=[0.0]),
         },
     ))
     client = _make_client(mock_step_server.port, step_mode="direct")
@@ -433,9 +433,9 @@ def test_step_reply_mirrors_state_into_local_mjdata_direct_mode(
         base_handshake,
         wr.step_ok(
             time=0.5, step=25,
-            per_articulation={
-                "vx300s": wr.per_articulation_block(qpos=[0.7, -0.3], qvel=[0.0, 0.0], ctrl=[0.0, 0.0]),
-                "go2":    wr.per_articulation_block(qpos=[0.1], qvel=[0.0], ctrl=[0.0]),
+            arts={
+                "vx300s": wr.art_block(qpos=[0.7, -0.3], qvel=[0.0, 0.0], ctrl=[0.0, 0.0]),
+                "go2":    wr.art_block(qpos=[0.1], qvel=[0.0], ctrl=[0.0]),
             },
         ),
     ])

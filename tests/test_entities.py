@@ -130,8 +130,8 @@ def test_entity_root_pose_absorbs_from_step_reply():
         {
             "time": 0.5,
             "step": 50,
-            "per_articulation": {},
-            "entities": {
+            "arts": {},
+            "scene": {
                 "pallet": {"xpos": [1.0, 2.0, 3.0], "xquat": [1.0, 0.0, 0.0, 0.0]}
             },
         }

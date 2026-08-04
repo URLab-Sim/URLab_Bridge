@@ -169,12 +169,19 @@ class MockStepServer:
     appended to `.received` so tests can assert on the request shape.
     """
 
-    def __init__(self, zmq_mod, msgpack_mod, port: int):
+    def __init__(self, zmq_mod, msgpack_mod, port: Optional[int] = None):
         self._zmq = zmq_mod
         self._msgpack = msgpack_mod
         self._ctx = zmq_mod.Context()
         self._socket = self._ctx.socket(zmq_mod.REP)
-        self._socket.bind(f"tcp://127.0.0.1:{port}")
+        if port is None:
+            # Let the OS assign a free port. A fixed counter-allocated band
+            # is not safe here: the Windows dynamic port range starts at
+            # 1024, so any outbound socket in the suite can transiently hold
+            # a port we were about to bind, producing "Address in use".
+            port = self._socket.bind_to_random_port("tcp://127.0.0.1")
+        else:
+            self._socket.bind(f"tcp://127.0.0.1:{port}")
         self._socket.setsockopt(zmq_mod.RCVTIMEO, 500)
 
         self.port = port
@@ -252,18 +259,10 @@ class MockStepServer:
             pass
 
 
-_PORT_COUNTER = [55900]
-
-
-def _next_port() -> int:
-    _PORT_COUNTER[0] += 1
-    return _PORT_COUNTER[0]
-
-
 @pytest.fixture
 def mock_step_server(zmq_mod, msgpack_mod):
-    """Yield a fresh MockStepServer on a unique loopback port."""
-    srv = MockStepServer(zmq_mod, msgpack_mod, _next_port())
+    """Yield a fresh MockStepServer on an OS-assigned loopback port."""
+    srv = MockStepServer(zmq_mod, msgpack_mod)
     try:
         yield srv
     finally:

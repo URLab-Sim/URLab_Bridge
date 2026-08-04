@@ -52,7 +52,7 @@ def _step_reply(qpos):
         "op": "step_ok",
         "time": 0.01,
         "step": 1,
-        "per_articulation": {
+        "arts": {
             "vx300s": {
                 "qpos": list(qpos),
                 "qvel": [0.0, 0.0],
