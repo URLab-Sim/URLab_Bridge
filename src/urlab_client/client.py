@@ -950,6 +950,15 @@ class URLabClient:
           attaching, guaranteeing the frame was rendered from this step's state
           (or newer). If the wait times out, the latest frame is attached and
           ``reply["cameras_stale"]`` is set True.
+        - ``"sync"``: do not use the streams at all. Ask the server to render
+          and read back inline, and return the pixels in this reply. The
+          server renders from the state this very step applied and waits on
+          that capture's readback serial, so the frame cannot be stale or
+          reordered -- at the cost of blocking the step on a GPU readback.
+
+          This is the only policy that works in puppet mode: the server pauses
+          its camera publishers on puppet entry (the step server owns cadence
+          there), so ``latest``/``fresh`` wait on streams that never tick.
 
         For a bounded, real-sensor-style camera lag that keeps the step loop
         running at full speed, configure a server-side delay with
@@ -957,8 +966,9 @@ class URLabClient:
         so every consumer sees the already-delayed stream, and a delayed camera
         never blocks the step on the current render.
 
-        Either way the frames also land on ``art.cameras[name].latest_frame``
-        via the background stream; the reply's ``cameras`` block is a snapshot.
+        In every policy the frames also land on ``art.cameras[name].latest_frame``,
+        so ``get_camera(name)`` returns the last one served; the reply's
+        ``cameras`` block is a snapshot.
 
         Returns the raw step reply, useful when you need fields like
         ``sim_time`` or ``step`` directly; for state, prefer
@@ -966,6 +976,19 @@ class URLabClient:
         ``art.get_sensors()``, etc.).
         """
         obs_str = wire(coerce(ObservationLevel, observations))
+        if camera_query not in ("latest", "fresh", "sync"):
+            raise ValueError(
+                "camera_query must be 'latest', 'fresh' or 'sync', "
+                f"got {camera_query!r}"
+            )
+
+        # "sync" is requested on the wire rather than merged from the streams
+        # afterwards, so it has to be resolved before the RPC goes out.
+        inline_cameras = (
+            self._inline_camera_request(include_cameras)
+            if include_cameras and camera_query == "sync"
+            else None
+        )
 
         # Optional real-time pacing: hold the loop to `target_hz` by sleeping
         # off any time remaining since the previous step() -- absorbs the manual
@@ -976,20 +999,27 @@ class URLabClient:
                 time.sleep(slack)
 
         if self.step_mode == StepMode.PUPPET:
-            reply = self._step_puppet(n_steps, observations=obs_str)
+            reply = self._step_puppet(
+                n_steps, observations=obs_str, include_cameras=inline_cameras
+            )
         else:
             # Live and Direct both use the RPC step path. UE's step
             # server applies ctrl + returns a state snapshot in either mode;
             # the difference is whether mj_step actually runs (Direct) or the
             # request just stamps NetworkValue and reads current state with
             # UE's autonomous physics continuing to advance (Live).
-            reply = self._step_direct(n_steps, observations=obs_str)
+            reply = self._step_direct(
+                n_steps, observations=obs_str, include_cameras=inline_cameras
+            )
 
         fid = reply.get("frame_id")
         if fid is not None:
             self._last_step_frame_id = int(fid)
 
-        if include_cameras:
+        # Inline pixels are already in the reply (and already decoded onto
+        # each URLabCameraView by _absorb_step_reply); only the streamed
+        # policies have anything left to merge.
+        if include_cameras and inline_cameras is None:
             self._attach_streamed_cameras(
                 reply, include_cameras, camera_query, camera_timeout_s
             )
@@ -1113,15 +1143,21 @@ class URLabClient:
             time.sleep(0.002)
 
     def _step_direct(
-        self, n_steps: int, *, observations: str,
+        self,
+        n_steps: int,
+        *,
+        observations: str,
+        include_cameras: "Optional[Dict[str, str]]" = None,
     ) -> Dict[str, Any]:
         per_art: Dict[str, Any] = {}
         for prefix, art in self.articulations.items():
             per_art[prefix] = art._build_step_request(control_mode=None)
 
-        # Cameras are NOT requested inline: they stream over SHM/ZMQ and are
-        # merged into the reply by _attach_streamed_cameras after the step.
-        # The reply's `frame_id` is what a "fresh" query synchronises against.
+        # Cameras stream over SHM/ZMQ by default and are merged into the reply
+        # by _attach_streamed_cameras after the step; the reply's `frame_id` is
+        # what a "fresh" query synchronises against. `include_cameras` here is
+        # non-None only for camera_query="sync", which asks the server to
+        # render and read back inline instead.
         request: Dict[str, Any] = {
             "n_steps": int(n_steps),
             "observations": observations,
@@ -1137,6 +1173,8 @@ class URLabClient:
                 name: vec.tolist()
                 for name, vec in self._pending_entity_xfrc.items()
             }
+        if include_cameras:
+            request["include_cameras"] = include_cameras
         reply = self._rpc("step", request, expected_op="step_ok")
         self._absorb_step_reply(reply)
         # Clear xfrc post-step per MuJoCo semantics
@@ -1146,7 +1184,11 @@ class URLabClient:
         return reply
 
     def _step_puppet(
-        self, n_steps: int, *, observations: str,
+        self,
+        n_steps: int,
+        *,
+        observations: str,
+        include_cameras: "Optional[Dict[str, str]]" = None,
     ) -> Dict[str, Any]:
         if mujoco is None:
             raise RuntimeError("mujoco not installed; puppet mode requires it")
@@ -1188,7 +1230,9 @@ class URLabClient:
         for _ in range(int(n_steps)):
             mujoco.mj_step(self.model, self.data)
 
-        # Cameras stream over SHM/ZMQ (see _step_direct); not requested inline.
+        # Cameras stream over SHM/ZMQ (see _step_direct) unless camera_query
+        # was "sync". In puppet mode the server pauses those publishers, so
+        # "sync" is in practice the only policy that yields a frame here.
         request: Dict[str, Any] = {
             "mode": wire(StepMode.PUPPET),
             "n_steps": int(n_steps),
@@ -1199,6 +1243,8 @@ class URLabClient:
             "ctrl": np.asarray(self.data.ctrl, dtype=np.float64).tolist(),
             "per_articulation": {},
         }
+        if include_cameras:
+            request["include_cameras"] = include_cameras
         reply = self._rpc("step", request, expected_op="step_ok")
         self._absorb_step_reply(reply)
         return reply
@@ -1520,6 +1566,19 @@ class URLabClient:
         if isinstance(include_cameras, (list, tuple, set, frozenset)):
             return set(include_cameras)
         return set()
+
+    def _inline_camera_request(self, include_cameras: Any) -> Dict[str, str]:
+        """Build the wire ``include_cameras`` block for ``camera_query="sync"``.
+
+        The server keys this by camera name with a per-camera capture mode;
+        ``"sync"`` means render now and embed the pixels in the step reply
+        rather than publishing them on a stream. ``True`` expands to every
+        discovered camera, since the wire form has no "all" spelling.
+        """
+        names = self._select_camera_names(include_cameras)
+        if names is None:
+            names = self.camera_names()
+        return {str(name): "sync" for name in names}
 
     def _gather_cached_cameras(self, include_cameras: Any) -> Dict[str, Dict[str, Any]]:
         """Read the latest cached frame off each requested URLabCameraView
@@ -2061,27 +2120,47 @@ class URLabClient:
                     pixels = bytes(pixels_obj)
                 else:
                     continue
-                # Find the matching URLabCameraView. Lookup by the
-                # bare camera name across every articulation; in
-                # practice each scene's cameras are name-unique because
-                # the server's ByName map collapses on bare name too.
-                for art in self.articulations.values():
-                    view = art.cameras.get(cam_name)
-                    if view is None:
-                        continue
-                    _st = cam_payload.get("sim_time")
-                    _sim_time = float(_st) if isinstance(_st, (int, float)) else self.sim_time
-                    _fid = cam_payload.get("frame_id")
-                    _frame_id = int(_fid) if _fid is not None else None
-                    if not URLabClient._decode_camera_frame(
-                        view, pixels,
-                        frame_id=_frame_id, sim_time=_sim_time,
-                    ):
-                        logger.debug(
-                            "include_cameras decode failed (%s/%s)",
-                            art.prefix, cam_name,
+                # Find the matching URLabCameraView by bare camera name --
+                # per-articulation first, then the global ones. A scene-level
+                # camera (a worldbody <camera> in the imported MJCF) is ONLY
+                # in global_cameras, and an articulations-only lookup dropped
+                # its pixels silently.
+                try:
+                    view = self._find_camera_view(cam_name)
+                except KeyError:
+                    logger.debug("include_cameras: unknown camera %r", cam_name)
+                    continue
+                # Trust the payload's own dimensions over the view's
+                # registered resolution: they are what `pixels` was sized
+                # by, and a view registered at a stale resolution would
+                # otherwise fail the size check and drop a good frame.
+                try:
+                    w = int(cam_payload.get("width") or view.resolution[0])
+                    h = int(cam_payload.get("height") or view.resolution[1])
+                    if view.mode == CameraMode.DEPTH:
+                        arr = np.frombuffer(pixels, dtype=np.float32)
+                        if arr.size != w * h:
+                            raise ValueError(f"expected {w * h} depth samples, got {arr.size}")
+                        view.latest_frame = arr.reshape((h, w))
+                    else:
+                        arr = np.frombuffer(pixels, dtype=np.uint8)
+                        if arr.size != w * h * 4:
+                            raise ValueError(f"expected {w * h * 4} bytes, got {arr.size}")
+                        bgra = arr.reshape((h, w, 4))
+                        view.latest_frame = (
+                            bgra[..., [2, 1, 0, 3]] if view.mode == CameraMode.REAL else bgra
                         )
-                    break
+                    view.frame_count += 1
+                    view.sim_time = (
+                        float(cam_payload["sim_time"])
+                        if isinstance(cam_payload.get("sim_time"), (int, float))
+                        else self.sim_time
+                    )
+                    _fid = cam_payload.get("frame_id")
+                    if _fid is not None:
+                        view.frame_id = int(_fid)
+                except Exception as exc:
+                    logger.debug("include_cameras decode failed (%s): %s", cam_name, exc)
 
         # Non-articulation entities. Write the reply's xpos/xquat into the
         # local MjData at the body's slot so `entity.root_pos_w` /
