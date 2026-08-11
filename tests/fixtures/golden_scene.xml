@@ -1,8 +1,14 @@
 <!--
   URLab integration-test golden scene.
   Minimal MJCF exercising: floor + light, 2-DOF arm with position
-  actuators + jointpos sensors. Hand-stable; do not edit without
-  regenerating tests/integration/_golden/trajectory.npz.
+  actuators + jointpos sensors.
+
+  Physically well-posed on purpose. The arm geoms clear each other at
+  rest, both joints carry armature and damping, and the actuators have
+  a velocity term, so the trajectory is dissipative rather than
+  chaotic: a perturbation of the initial state decays instead of
+  growing, which is what makes a step-for-step comparison against
+  stock MuJoCo a regression test rather than a coin toss.
 
   No standalone free-jointed entity here: URLab's MJCF importer
   currently bundles every body into one Blueprint = one
@@ -12,20 +18,26 @@
 -->
 <mujoco model="urlab_golden_scene">
     <compiler angle="radian"/>
-    <option timestep="0.002" integrator="implicitfast"/>
+    <!-- `iterations` is off MuJoCo's default so the <option> round-trip is
+         actually observable. -->
+    <option timestep="0.002" integrator="implicitfast" iterations="50"/>
 
     <worldbody>
-        <light pos="0 0 3" dir="0 0 -1"/>
+        <!-- Directional: a positioned light with a `dir` is a spot, and it
+             reaches nothing here, so camera frames come back black. -->
+        <light directional="true" pos="0 0 3" dir="0 0 -1"/>
         <geom name="floor" type="plane" size="2 2 0.1" rgba="0.6 0.6 0.6 1"/>
 
         <body name="arm_base" pos="0 0 0.1">
             <geom name="base" type="cylinder" size="0.05 0.05" rgba="0.7 0.2 0.2 1"/>
-            <body name="link1" pos="0 0 0.05">
-                <joint name="shoulder" type="hinge" axis="0 1 0" range="-1.5 1.5"/>
+            <body name="link1" pos="0 0 0.09">
+                <joint name="shoulder" type="hinge" axis="0 1 0" range="-1.5 1.5"
+                       armature="0.01" damping="0.5"/>
                 <geom name="link1_geom" type="capsule" fromto="0 0 0 0.2 0 0" size="0.02" rgba="0.3 0.5 0.8 1"/>
                 <camera name="head" pos="0.05 0 0.1" euler="0 -1.5708 0" fovy="60"/>
                 <body name="link2" pos="0.2 0 0">
-                    <joint name="elbow" type="hinge" axis="0 1 0" range="-1.5 1.5"/>
+                    <joint name="elbow" type="hinge" axis="0 1 0" range="-1.5 1.5"
+                           armature="0.01" damping="0.5"/>
                     <geom name="link2_geom" type="capsule" fromto="0 0 0 0.15 0 0" size="0.015" rgba="0.3 0.8 0.5 1"/>
                 </body>
             </body>
@@ -33,8 +45,8 @@
     </worldbody>
 
     <actuator>
-        <position name="shoulder_act" joint="shoulder" kp="50"/>
-        <position name="elbow_act" joint="elbow" kp="50"/>
+        <position name="shoulder_act" joint="shoulder" kp="50" kv="5"/>
+        <position name="elbow_act" joint="elbow" kp="50" kv="5"/>
     </actuator>
 
     <sensor>

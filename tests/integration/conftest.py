@@ -60,21 +60,6 @@ class SceneBootstrap(NamedTuple):
     original_level: str
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--regenerate-golden",
-        action="store_true",
-        default=False,
-        help="Rewrite the golden trajectory reference for test_live_golden "
-             "instead of comparing. Run locally against a known-good editor.",
-    )
-
-
-@pytest.fixture
-def regenerate_golden(request):
-    return request.config.getoption("--regenerate-golden")
-
-
 def pytest_collection_modifyitems(config, items):  # noqa: ARG001
     if not LIVE:
         skip = pytest.mark.skip(reason="URLAB_LIVE=1 not set; live-UE tests skipped")
@@ -256,10 +241,10 @@ def _claim_all(client) -> None:
     releasing would otherwise lock every later one out.
     """
     for prefix in list(getattr(client, "articulations", {}) or {}):
-        try:
-            client.runtime.claim_control(prefix, force=True)
-        except Exception:
-            pass
+        # Not swallowed: a claim that fails leaves every later write failing
+        # with `not_control_owner`, and the test that reports it is whichever
+        # one happened to run next rather than the one that lost the claim.
+        client.runtime.claim_control(prefix, force=True)
 
 
 @pytest.fixture
