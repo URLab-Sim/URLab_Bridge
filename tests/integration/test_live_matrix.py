@@ -40,10 +40,13 @@ from urlab_client import StepMode, URLabClient
 HOST = os.environ.get("URLAB_HOST", "tcp://127.0.0.1")
 STEP_PORT = int(os.environ.get("URLAB_STEP_PORT", "5559"))
 
-_IS_LINUX = sys.platform.startswith("linux")
+# The transport is implemented for POSIX futex and for Windows kernel events
+# (`urlab_client/transports/shm.py`), so the matrix runs it wherever the client
+# can actually open the region. Gating on Linux alone left the Windows path
+# claiming to be "covered by separate runs" that do not exist.
+_SHM_SUPPORTED = sys.platform.startswith("linux") or sys.platform == "win32"
 _SHM_SKIP_REASON = (
-    "SHM transport tests only run on Linux. The kernel-event path "
-    "(Windows / macOS) is covered by separate platform-specific runs."
+    f"SHM transport is not implemented on this platform ({sys.platform})."
 )
 
 
@@ -65,7 +68,7 @@ def matrix_client(request, _live_session):
     the (transport, step_mode) combo, walks discover + auto-promotes
     the step mode if applicable, yields, then closes."""
     transport, mode = request.param
-    if transport == "shm" and not _IS_LINUX:
+    if transport == "shm" and not _SHM_SUPPORTED:
         pytest.skip(_SHM_SKIP_REASON)
 
     # AUTO promotes implicitly. For LIVE, no promotion happens (LIVE is
