@@ -50,17 +50,17 @@ def test_concurrent_absorb_does_not_crash_or_corrupt(base_handshake):
     sample_reply: Dict[str, Any] = {
         "time": 0.0,
         "step": 0,
-        "per_articulation": {},
+        "arts": {},
     }
     for prefix, art in client.articulations.items():
         n_qpos = sum(j.qpos_dim for j in art.joints.values())
         n_qvel = sum(j.qvel_dim for j in art.joints.values())
-        sample_reply["per_articulation"][prefix] = {
+        sample_reply["arts"][prefix] = {
             "qpos": [0.0] * n_qpos,
             "qvel": [0.0] * n_qvel,
         }
 
-    if not sample_reply["per_articulation"]:
+    if not sample_reply["arts"]:
         pytest.skip("no articulations to drive in handshake")
 
     errors: list[BaseException] = []

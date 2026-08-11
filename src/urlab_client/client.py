@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import tempfile
 import threading
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -34,7 +36,18 @@ from .enums import (
     coerce,
     wire,
 )
-from .errors import URLabRPCError, URLabTimeoutError, URLabVersionMismatch
+from .errors import (
+    URLabPuppetDriftError,
+    URLabRPCError,
+    URLabTimeoutError,
+)
+from ._model_upload import (
+    MAX_ASSETS,
+    flatten_model,
+    iter_chunks,
+    require_bare_filename,
+    sha256_hex,
+)
 from .results import StepResult
 from .namespaces.debug import _DebugNamespace
 from .namespaces.outliner import _OutlinerNamespace
@@ -64,6 +77,14 @@ _OP_TIMEOUTS_S: Dict[str, float] = {
     "spawn_grid": 60.0,
     "spawn_light": 30.0,
     "duplicate_actor": 30.0,
+    # Allocates a render target and binds a port per camera.
+    "set_camera_streaming": 30.0,
+    # Walk the whole world on the game thread; a populated level outgrows 5s.
+    "list_actors": 30.0,
+    "find_actors": 30.0,
+    "get_actor_bounds": 30.0,
+    "actor_hierarchy": 30.0,
+    "snapshot": 30.0,
 }
 
 
@@ -114,23 +135,26 @@ class URLabClient:
         step_mode: Union[str, StepMode] = "auto",
         step_port: int = 5559,
         state_port: int = 5555,
-        ctrl_port: int = 5556,
-        info_port: int = 5557,
         mujoco_version_check: bool = True,
         local_model: bool = True,
         recv_timeout_ms: int = 5000,
         auto_promote_step_mode: bool = True,
-        transport: Union[str, Transport] = "zmq",
+        transport: Union[str, Transport] = "auto",
         shm_dir: Optional[str] = None,
+        puppet_drift_check: str = "warn",
     ):
         self.address = address
         self.step_mode: StepMode = coerce(StepMode, step_mode, default=StepMode.AUTO)
         self.step_port = step_port
         self.state_port = state_port
-        self.ctrl_port = ctrl_port
-        self.info_port = info_port
         self.mujoco_version_check = mujoco_version_check
         self.local_model = local_model
+        if puppet_drift_check not in ("error", "warn", "off"):
+            raise ValueError(
+                "puppet_drift_check must be 'error', 'warn' or 'off', "
+                f"got {puppet_drift_check!r}"
+            )
+        self.puppet_drift_check = puppet_drift_check
         self._recv_timeout_ms = recv_timeout_ms
         self._auto_promote_step_mode = auto_promote_step_mode
 
@@ -139,9 +163,28 @@ class URLabClient:
         self.mujoco_version: Optional[str] = None
         # False until PIE starts; editor-only ops still work pre-PIE.
         self.manager_present: bool = False
+        # Render-farm identity advertised in the handshake `instance` block
+        # (instance_id / index / host / ports / capabilities). Empty when the
+        # server is not farm-aware. `instance.host` drives the transport=auto
+        # locality decision in connect().
+        self.instance: Dict[str, Any] = {}
+        # Cooperative farm lease id, set by URLabPool.lease when this client
+        # claimed its instance; released on close(). None for un-leased clients.
+        self.lease_id: Optional[str] = None
+        # Set by URLabPool.lease to the InstanceInfo this client leased.
+        self._leased_instance: Any = None
         self.shm_session_dir: str = ""
+        # Explicit SHM RPC contract from the handshake (session/paths/event
+        # names for req.shm/rep.shm). The RPC region lives on its own static
+        # session, distinct from the per-PIE camera/state stream dir; the
+        # transport must use these verbatim or every RPC stalls its full timeout.
+        self._shm_rpc_contract: Optional[Dict[str, Any]] = None
         self.model: Any = None
         self.data: Any = None
+        # Set by _apply_handshake_locked when the MJB couldn't load and the
+        # reply carried no compiled XML; the outer _apply_handshake then
+        # refetches the handshake once with include_assets=true.
+        self._model_fallback_pending: bool = False
         self.sim_time: float = 0.0
         self.step_count: int = 0
 
@@ -177,13 +220,36 @@ class URLabClient:
         # xfrc is tracked separately on each URLabArticulation.
         self._pending_entity_xfrc: Dict[str, np.ndarray] = {}
 
+        # Observation level requested at connect(); re-sent on any internal
+        # handshake refetch so a model-fallback round-trip does not silently
+        # revert the server to its default observation level.
+        self._observation_level: str = "standard"
+
+        # Per-camera server-side delay (seconds) last applied via
+        # runtime.set_camera_delay, keyed by canonical camera name. Under a
+        # nonzero delay a "fresh" frame for the just-stepped state can never
+        # reveal within the step, so the fresh-wait paths degrade such cameras
+        # to "latest" instead of burning the whole camera timeout.
+        self._camera_applied_delay: Dict[str, float] = {}
+
         # transport="shm" defers actual SHM construction to connect()
         # so we can pull the session dir out of the handshake; until then
         # we use ZMQ for the hello round-trip.
         self._shm_dir_override: Optional[str] = shm_dir
-        self._pending_shm_swap: bool = False
+        self._want_shm: bool = False
+        # Config the live SHM transport was built from (stream dir + advertised
+        # RPC paths/events). Re-diffed against every handshake so a PIE restart
+        # that moves the session dir rebuilds the transport instead of spinning
+        # forever on the dead files.
+        self._active_shm_config: Optional[Tuple[Any, ...]] = None
+        # Transport preference: "auto" bootstraps over ZMQ for hello, then
+        # upgrades to SHM in connect() only when the handshake reports the
+        # instance is co-located (same hostname + a locally-accessible SHM
+        # session dir). "zmq"/"shm" force the choice. All three bootstrap the
+        # ZMQ transport first; SHM construction is deferred to connect().
+        self._transport_pref: str = "explicit"
         if isinstance(transport, str):
-            if transport in ("zmq", "shm"):
+            if transport in ("zmq", "shm", "auto"):
                 self._transport: Transport = make_transport(
                     "zmq",
                     address,
@@ -191,11 +257,12 @@ class URLabClient:
                     state_port=state_port,
                     recv_timeout_ms=recv_timeout_ms,
                 )
-                self._pending_shm_swap = (transport == "shm")
+                self._want_shm = (transport == "shm")
+                self._transport_pref = transport
             else:
                 raise ValueError(
                     f"unknown transport name {transport!r}; expected "
-                    f"'zmq' or 'shm', or pass a Transport instance"
+                    f"'auto', 'zmq' or 'shm', or pass a Transport instance"
                 )
         else:
             self._transport = transport
@@ -221,6 +288,46 @@ class URLabClient:
         # Reentrant: `_absorb_step_reply` → `_mirror_state_into_data`
         # both acquire. Cross-thread readers must take this lock too.
         self._data_lock: threading.RLock = threading.RLock()
+        self._camera_frame_cond = threading.Condition()
+
+    def attach_puppet_simulation(self, model: Any, data: Any) -> None:
+        """Use an externally owned MuJoCo simulation as the puppet source.
+
+        Call this before :meth:`connect`. The client retains the exact model
+        and data objects; ``step(n_steps=0)`` can then transmit their current
+        state without advancing physics locally.
+
+        The binding is made before the URLab scene exists -- levels are
+        loaded, MJCF imported and actors spawned afterwards -- so the two
+        models can diverge between here and the first push. Every handshake
+        that carries an MJB is therefore checked against this model (see
+        ``puppet_drift_check``), including the fresh one ``sim.start``
+        absorbs once PIE is up. A mismatch cannot be repaired after the
+        fact, since a puppet step is just a raw ``qpos``/``qvel``/``ctrl``
+        vector, so it raises :class:`URLabPuppetDriftError` instead of
+        pushing state onto the wrong degrees of freedom.
+        """
+        if mujoco is None:
+            raise RuntimeError("mujoco not installed; puppet mode requires it")
+        if self.session_id is not None:
+            raise RuntimeError(
+                "attach_puppet_simulation must be called before connect"
+            )
+        if self.step_mode not in (StepMode.AUTO, StepMode.PUPPET):
+            raise ValueError(
+                "external simulation attachment requires puppet or auto mode"
+            )
+        if not isinstance(model, mujoco.MjModel):
+            raise TypeError("model must be a mujoco.MjModel")
+        if not isinstance(data, mujoco.MjData):
+            raise TypeError("data must be a mujoco.MjData")
+        if data.model is not model:
+            raise ValueError("data must have been created from the same model")
+
+        self.model = model
+        self.data = data
+        self.local_model = False
+        self.step_mode = StepMode.PUPPET
 
     # -- transport --------------------------------------------------------
 
@@ -335,9 +442,11 @@ class URLabClient:
     # -- session lifecycle ------------------------------------------------
 
     def connect(self, observations: Union[str, ObservationLevel] = "standard") -> None:
-        """Handshake: send `hello`, load the MJB, construct articulation
-        wrappers. Raises on a version mismatch unless
-        `mujoco_version_check=False` was set.
+        """Handshake: send `hello`, build the local model (MJB fast path,
+        compiled-XML fallback when the server runs a different MuJoCo
+        version), construct articulation wrappers. A version skew logs a
+        warning (silenced by `mujoco_version_check=False`); it no longer
+        raises.
 
         After the handshake, if the user constructed the client with an
         explicit `step_mode` (`direct` or `puppet`), tell the server to
@@ -346,6 +455,7 @@ class URLabClient:
         promotes it.
         """
         obs_str = wire(coerce(ObservationLevel, observations))
+        self._observation_level = obs_str
         # Always pin encoding=msgpack on hello. The server's encoding
         # flag is global, so leaving it implicit means we inherit
         # whatever the previous session set (e.g. a debugging client
@@ -405,12 +515,20 @@ class URLabClient:
             )
             return
 
-        # If the user asked for transport="shm", swap the temporary ZMQ
-        # transport for a real SHM transport now that the handshake has
-        # told us where to look. The ZMQ transport stays alive as the
-        # SHM transport's fallback for ops too large for the slot.
-        if self._pending_shm_swap:
-            self._activate_shm_transport()
+        # transport="auto": decide locality from the handshake now that the
+        # instance host + SHM session dir are known. Same-host upgrades to SHM;
+        # a remote client stays on ZMQ (shared memory does not cross machines).
+        if self._transport_pref == "auto":
+            self._detect_locality_transport()
+
+        # If the user asked for transport="shm" (or auto concluded same-host),
+        # (re)build the SHM transport from what this handshake advertised. Done
+        # on EVERY handshake, not just the first: a PIE restart hands out a new
+        # session dir / RPC contract, and a transport still bound to the previous
+        # PIE's dead files would silently freeze all SHM streaming and stall
+        # every RPC.
+        if self._want_shm:
+            self._ensure_shm_transport()
 
         if (
             self._auto_promote_step_mode
@@ -437,6 +555,83 @@ class URLabClient:
         # set_camera_streaming inside enables the per-camera broadcast.
         self._start_streaming_subs()
 
+    @staticmethod
+    def _model_layout(model: Any) -> Dict[str, Any]:
+        """The parts of a model a raw puppet state vector depends on."""
+        names = {
+            "bodies": mujoco.mjtObj.mjOBJ_BODY,
+            "joints": mujoco.mjtObj.mjOBJ_JOINT,
+            "actuators": mujoco.mjtObj.mjOBJ_ACTUATOR,
+        }
+        counts = {"bodies": model.nbody, "joints": model.njnt, "actuators": model.nu}
+        layout: Dict[str, Any] = {
+            "nq": int(model.nq),
+            "nv": int(model.nv),
+            "nu": int(model.nu),
+        }
+        for key, obj_type in names.items():
+            layout[key] = [
+                mujoco.mj_id2name(model, obj_type, i) or "" for i in range(counts[key])
+            ]
+        # Joint type/address ordering decides which slice of qpos each
+        # joint reads; a slide imported as a hinge keeps nq intact but
+        # silently reinterprets the numbers.
+        layout["jnt_type"] = [int(v) for v in model.jnt_type]
+        layout["jnt_qposadr"] = [int(v) for v in model.jnt_qposadr]
+        return layout
+
+    def _check_puppet_drift(self, mjb_bytes: bytes) -> None:
+        """Compare the server's model against the attached puppet source.
+
+        A drift cannot be repaired from here -- the state vectors are
+        already ambiguous -- so this only reports it.
+
+        Dimension mismatches always raise: a puppet step transmits exactly
+        ``nq``/``nv``/``nu`` floats, so there is no reading under which
+        differing counts are benign. Name and ordering differences follow
+        ``puppet_drift_check`` ('error' | 'warn' | 'off'), defaulting to
+        'warn' because a scene may legitimately carry bodies the source
+        model never had.
+        """
+        if self.puppet_drift_check == "off" or self.model is None:
+            return
+        try:
+            server_model, _ = _load_mjb(mjb_bytes)
+        except Exception as exc:  # unreadable MJB is not itself a drift
+            logger.warning("puppet drift check skipped: MJB unreadable (%s)", exc)
+            return
+
+        local = self._model_layout(self.model)
+        server = self._model_layout(server_model)
+        fatal: List[str] = []
+        for field in ("nq", "nv", "nu"):
+            if local[field] != server[field]:
+                fatal.append(f"{field} local={local[field]} server={server[field]}")
+        if fatal:
+            raise URLabPuppetDriftError(fatal)
+
+        differences: List[str] = []
+        for field in ("bodies", "joints", "actuators"):
+            missing = [n for n in local[field] if n and n not in set(server[field])]
+            if missing:
+                head = ", ".join(missing[:5])
+                tail = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+                differences.append(f"{field} missing server-side: {head}{tail}")
+        for field in ("jnt_type", "jnt_qposadr"):
+            if local[field] != server[field]:
+                differences.append(f"{field} ordering differs")
+
+        if not differences:
+            logger.debug("puppet drift check: server model matches attached source")
+            return
+        if self.puppet_drift_check == "warn":
+            logger.warning(
+                "puppet model drift (pushes may land on the wrong DOFs): %s",
+                "; ".join(differences),
+            )
+            return
+        raise URLabPuppetDriftError(differences)
+
     def _apply_handshake(self, reply: Mapping[str, Any]) -> None:
         """Shared entry point used by `connect()` and tests that inject
         a canned handshake without the socket round-trip."""
@@ -446,7 +641,53 @@ class URLabClient:
         with self._data_lock:
             self._apply_handshake_locked(reply)
 
+        # The MJB didn't load (version skew) and this reply carried no
+        # compiled XML: refetch the handshake once with assets included.
+        # Outside _data_lock -- this is an RPC round-trip.
+        if self._model_fallback_pending:
+            self._model_fallback_pending = False
+            logger.info(
+                "refetching handshake with include_assets=true to build the "
+                "local model from compiled XML"
+            )
+            fresh = self._rpc(
+                "hello",
+                {
+                    "client_version": self._client_version(),
+                    "encoding": "msgpack",
+                    "include_assets": True,
+                    # Carry the requested observation level: the server's
+                    # observation flag is global, so omitting it here reverts
+                    # UE to its default level for the rest of the session.
+                    "observations": self._observation_level,
+                },
+                expected_op="hello_ok",
+            )
+            with self._data_lock:
+                self._apply_handshake_locked(fresh)
+            # One retry only -- an older server that never ships
+            # mjcf_compiled would otherwise refetch on every handshake.
+            self._model_fallback_pending = False
+
+        if (
+            self.local_model
+            and mujoco is not None
+            and self.model is None
+            and self.articulations
+        ):
+            logger.warning(
+                "no local MjModel could be built from this handshake; "
+                "articulation joint/actuator maps are EMPTY, so name-based "
+                "control (policy adapters, art.set_ctrl) will silently no-op"
+            )
+
     def _apply_handshake_locked(self, reply: Mapping[str, Any]) -> None:
+        # A handshake means a fresh (possibly restarted) PIE world: the old
+        # render-snapshot frame_id counter is meaningless now, so drop it.
+        # Leaving it set makes the first post-restart get_camera(fresh=True)
+        # wait for a frame_id the new session may never reach, burning the
+        # whole timeout.
+        self._last_step_frame_id = None
         self.session_id = reply.get("session_id")
         self.urlab_version = reply.get("urlab_version")
         self.mujoco_version = reply.get("mujoco_version")
@@ -454,22 +695,81 @@ class URLabClient:
         # the field (older server builds + the PIE-time begin_pie reply
         # always has a manager). Editor-time hello explicitly sets false.
         self.manager_present = bool(reply.get("manager_present", True))
+        instance_block = reply.get("instance")
+        if isinstance(instance_block, Mapping):
+            self.instance = dict(instance_block)
         self.shm_session_dir = str(reply.get("shm_session_dir", "") or "")
+        rpc_contract = reply.get("shm_rpc")
+        if isinstance(rpc_contract, Mapping):
+            self._shm_rpc_contract = dict(rpc_contract)
 
         if self.mujoco_version_check and mujoco is not None:
             server_ver = str(self.mujoco_version or "")
             client_ver = mujoco.__version__
             if server_ver and server_ver != client_ver:
-                raise URLabVersionMismatch(
-                    f"MuJoCo version mismatch: server={server_ver!r} "
-                    f"client={client_ver!r}. Pin both sides or pass "
-                    f"mujoco_version_check=False to bypass."
-                )
+                # Warn, never raise: a skew only matters for the local-model
+                # MJB load, and that path falls back to the version-portable
+                # compiled-XML route below.
+                if _major_minor(server_ver) != _major_minor(client_ver):
+                    logger.warning(
+                        "MuJoCo version skew: server=%s client=%s. The MJB "
+                        "binary format is version-locked, so the local model "
+                        "will be built from the compiled XML instead; puppet "
+                        "mode may still behave differently across versions.",
+                        server_ver, client_ver,
+                    )
+                else:
+                    logger.debug(
+                        "MuJoCo patch-level skew: server=%s client=%s",
+                        server_ver, client_ver,
+                    )
 
-        # Load MJB into a local MjModel.
+        # Build the local MjModel: MJB fast path, then the version-portable
+        # compiled-XML fallback (an MJB only loads into the exact MuJoCo
+        # version that saved it). When neither is present in this reply but
+        # a manager is live, flag a one-shot asset refetch -- everything
+        # that resolves joints/actuators (URLabArticulation._walk_model)
+        # needs a model, and building it silently empty bricks every
+        # name-based consumer (issue #76).
+        self._model_fallback_pending = False
         mjb_bytes = reply.get("mjb")
-        if self.local_model and mjb_bytes and mujoco is not None:
-            self.model, self.data = _load_mjb(mjb_bytes)
+        mjcf_xml = reply.get("mjcf_compiled")
+        if self.local_model and mujoco is not None and (mjb_bytes or mjcf_xml):
+            model = data = None
+            if mjb_bytes:
+                try:
+                    model, data = _load_mjb(mjb_bytes)
+                except Exception as exc:
+                    logger.warning(
+                        "MJB load failed (%s); falling back to the compiled-"
+                        "XML model (server mujoco %s, client %s)",
+                        exc, self.mujoco_version,
+                        mujoco.__version__,
+                    )
+            if model is None:
+                if mjcf_xml:
+                    model, data = _load_xml_with_assets(
+                        str(mjcf_xml), reply.get("vfs_assets") or {}
+                    )
+                    logger.info(
+                        "local model built from compiled XML (%d assets)",
+                        len(reply.get("vfs_assets") or {}),
+                    )
+                else:
+                    self._model_fallback_pending = bool(
+                        reply.get("manager_present", True)
+                    )
+            if model is not None:
+                self.model, self.data = model, data
+        elif mjb_bytes and mujoco is not None:
+            # An external simulation is attached (local_model=False), so the
+            # server's MJB is not adopted -- but it is exactly what a puppet
+            # push lands in, and it is the only evidence we get that the two
+            # models still agree. `attach_puppet_simulation` runs before the
+            # level is even loaded; the scene is imported, spawned and PIE'd
+            # afterwards, and `sim.start` re-absorbs a handshake describing
+            # whatever actually got built. Compare here or not at all.
+            self._check_puppet_drift(mjb_bytes)
 
         # Build articulations
         self.articulations = {}
@@ -508,8 +808,11 @@ class URLabClient:
             entity.qvel_offset = payload.get("qvel_offset")
             self.entities[name] = entity
 
-        # Global cameras — reserved slot, empty today but accept any
-        # payload for forward compatibility
+        # Global cameras. Rebuilt from scratch each handshake (like the
+        # articulation set above); accumulating across refresh() would leak
+        # stale views from a prior scene and make warmup_cameras wait on
+        # cameras that no longer exist.
+        self.global_cameras = {}
         for cam_name, cam_payload in (reply.get("global_cameras") or {}).items():
             self.global_cameras[cam_name] = URLabCameraView.from_handshake(
                 cam_name, cam_payload, owner=None
@@ -518,34 +821,104 @@ class URLabClient:
     def _client_version(self) -> str:
         return "urlab_bridge/0.1.0-alpha"
 
-    def _activate_shm_transport(self) -> None:
-        """Replace the bootstrap ZMQ transport with a real ShmTransport
-        once the handshake has provided the session dir. The existing ZMQ
-        transport is reused as the SHM transport's fallback (for ops too
-        large for the SHM slot, notably `hello`)."""
+    def _detect_locality_transport(self) -> None:
+        """transport=auto locality decision (see plan_render_farm.md 3.6).
+
+        Conclude SAME-HOST when the handshake's ``instance.host`` matches this
+        machine's hostname AND the advertised ``shm_session_dir`` exists on the
+        local filesystem; only then flip ``_want_shm`` so connect() upgrades to
+        the same-host SHM transport. Otherwise stay on ZMQ -- shared memory
+        never crosses machines, so a remote client must use TCP for everything.
+        Idempotent and safe to call on every handshake.
+        """
+        host = str((self.instance or {}).get("host") or "")
+        local_host = socket.gethostname()
+        shm_ok = bool(self.shm_session_dir) and os.path.isdir(self.shm_session_dir)
+        same_host = bool(host) and host == local_host and shm_ok
+        if same_host:
+            logger.info(
+                "URLabClient transport=auto: instance is co-located "
+                "(host=%s, shm_dir=%s); upgrading to SHM.",
+                host, self.shm_session_dir,
+            )
+            self._want_shm = True
+        else:
+            logger.info(
+                "URLabClient transport=auto: staying on ZMQ "
+                "(instance host=%r vs local %r, shm_dir=%r accessible=%s).",
+                host, local_host, self.shm_session_dir, shm_ok,
+            )
+            self._want_shm = False
+
+    def _ensure_shm_transport(self) -> None:
+        """(Re)build the ShmTransport to match what the latest handshake
+        advertised, rebuilding only when the config actually changed.
+
+        First call swaps the bootstrap ZMQ transport for a real ShmTransport,
+        reusing the ZMQ transport as the SHM fallback (for ops too large for
+        the slot, notably `hello`). Subsequent handshakes re-diff the stream
+        dir + advertised RPC contract against the live transport; a PIE restart
+        that moves the session dir triggers a rebuild so streaming does not
+        freeze on the previous PIE's dead files.
+        """
+        # shm_dir is the per-PIE camera/state STREAM session (state.shm +
+        # cam_*.shm live here). The RPC region (req.shm/rep.shm + its kernel
+        # events) lives on the RPC transport's OWN, static session, advertised
+        # verbatim in the `shm_rpc` handshake block -- a DIFFERENT directory.
+        # These must be wired separately: pointing RPC at the stream dir stalls
+        # every RPC its full timeout (UE's RPC worker never services it), and
+        # pointing the streams at the RPC dir starves state/cameras. Precedence
+        # for the stream dir: explicit override > handshake stream dir.
+        from .transports.shm import ShmTransport
+
         shm_dir = self._shm_dir_override or self.shm_session_dir
         if not shm_dir:
             raise RuntimeError(
                 "transport='shm' requested but neither shm_dir override nor "
                 "handshake `shm_session_dir` was set; pass shm_dir explicitly"
             )
-        # The SHM session id is the basename of the dir -- UE's
-        # USmStepTransport uses it to name its kernel events
-        # (`Local\URLab_<sid>_req_ready`), and the bridge must use the
-        # same name to OpenEventW. Distinct from `self.session_id`,
-        # which is the dispatcher's per-hello RPC session GUID.
         shm_session_id = os.path.basename(os.path.normpath(shm_dir)) or "live"
+
+        # RPC region: use the advertised contract verbatim when present; else
+        # fall back to deriving from the stream dir (legacy servers).
+        contract = self._shm_rpc_contract or {}
+        config = (
+            shm_dir,
+            shm_session_id,
+            contract.get("req_path"),
+            contract.get("rep_path"),
+            contract.get("req_event"),
+            contract.get("rep_event"),
+        )
+        if isinstance(self._transport, ShmTransport) and config == self._active_shm_config:
+            # Already bound to exactly this session; nothing to rebuild.
+            return
+
+        # Recover the ZMQ fallback to reuse it under the new SHM transport. On
+        # the first swap the live transport IS the ZMQ bootstrap; on a rebuild
+        # it is the old SHM transport, whose fallback we lift out before tearing
+        # its stream/RPC bindings down (without closing the shared fallback).
+        if isinstance(self._transport, ShmTransport):
+            fallback = self._transport._fallback
+            self._transport.close(close_fallback=False)
+        else:
+            fallback = self._transport
+
         self._transport = make_transport(
             "shm",
             self.address,
             shm_dir=shm_dir,
             shm_session_id=shm_session_id,
-            fallback=self._transport,
+            fallback=fallback,
+            rpc_req_path=contract.get("req_path"),
+            rpc_rep_path=contract.get("rep_path"),
+            rpc_req_event=contract.get("req_event"),
+            rpc_rep_event=contract.get("rep_event"),
         )
-        self._pending_shm_swap = False
+        self._active_shm_config = config
         logger.info(
-            "URLabClient: SHM transport active (dir=%s, session=%s)",
-            shm_dir, shm_session_id,
+            "URLabClient: SHM transport active (stream_dir=%s, rpc_session=%s)",
+            shm_dir, contract.get("session", shm_session_id),
         )
 
     # -- step / reset -----------------------------------------------------
@@ -559,7 +932,7 @@ class URLabClient:
         camera_timeout_s: float = 0.5,
         observations: Union[str, ObservationLevel] = "standard",
         target_hz: Optional[float] = None,
-    ) -> Dict[str, Any]:
+    ) -> "StepResult":
         """Advance the sim. Behaviour per `self.step_mode`:
 
         - `direct`: UE steps `n_steps`. Payload carries `ctrl`.
@@ -585,9 +958,25 @@ class URLabClient:
           attaching, guaranteeing the frame was rendered from this step's state
           (or newer). If the wait times out, the latest frame is attached and
           ``reply["cameras_stale"]`` is set True.
+        - ``"sync"``: do not use the streams at all. Ask the server to render
+          and read back inline, and return the pixels in this reply. The
+          server renders from the state this very step applied and waits on
+          that capture's readback serial, so the frame cannot be stale or
+          reordered -- at the cost of blocking the step on a GPU readback.
 
-        Either way the frames also land on ``art.cameras[name].latest_frame``
-        via the background stream; the reply's ``cameras`` block is a snapshot.
+          This is the only policy that works in puppet mode: the server pauses
+          its camera publishers on puppet entry (the step server owns cadence
+          there), so ``latest``/``fresh`` wait on streams that never tick.
+
+        For a bounded, real-sensor-style camera lag that keeps the step loop
+        running at full speed, configure a server-side delay with
+        ``runtime.set_camera_delay(...)`` -- the delay is applied natively in UE
+        so every consumer sees the already-delayed stream, and a delayed camera
+        never blocks the step on the current render.
+
+        In every policy the frames also land on ``art.cameras[name].latest_frame``,
+        so ``get_camera(name)`` returns the last one served; the reply's
+        ``cameras`` block is a snapshot.
 
         Returns the raw step reply, useful when you need fields like
         ``sim_time`` or ``step`` directly; for state, prefer
@@ -595,6 +984,19 @@ class URLabClient:
         ``art.get_sensors()``, etc.).
         """
         obs_str = wire(coerce(ObservationLevel, observations))
+        if camera_query not in ("latest", "fresh", "sync"):
+            raise ValueError(
+                "camera_query must be 'latest', 'fresh' or 'sync', "
+                f"got {camera_query!r}"
+            )
+
+        # "sync" is requested on the wire rather than merged from the streams
+        # afterwards, so it has to be resolved before the RPC goes out.
+        inline_cameras = (
+            self._inline_camera_request(include_cameras)
+            if include_cameras and camera_query == "sync"
+            else None
+        )
 
         # Optional real-time pacing: hold the loop to `target_hz` by sleeping
         # off any time remaining since the previous step() -- absorbs the manual
@@ -605,20 +1007,27 @@ class URLabClient:
                 time.sleep(slack)
 
         if self.step_mode == StepMode.PUPPET:
-            reply = self._step_puppet(n_steps, observations=obs_str)
+            reply = self._step_puppet(
+                n_steps, observations=obs_str, include_cameras=inline_cameras
+            )
         else:
             # Live and Direct both use the RPC step path. UE's step
             # server applies ctrl + returns a state snapshot in either mode;
             # the difference is whether mj_step actually runs (Direct) or the
             # request just stamps NetworkValue and reads current state with
             # UE's autonomous physics continuing to advance (Live).
-            reply = self._step_direct(n_steps, observations=obs_str)
+            reply = self._step_direct(
+                n_steps, observations=obs_str, include_cameras=inline_cameras
+            )
 
         fid = reply.get("frame_id")
         if fid is not None:
             self._last_step_frame_id = int(fid)
 
-        if include_cameras:
+        # Inline pixels are already in the reply (and already decoded onto
+        # each URLabCameraView by _absorb_step_reply); only the streamed
+        # policies have anything left to merge.
+        if include_cameras and inline_cameras is None:
             self._attach_streamed_cameras(
                 reply, include_cameras, camera_query, camera_timeout_s
             )
@@ -709,12 +1118,21 @@ class URLabClient:
 
         Blocks up to ``timeout_s`` for a frame to be available (covers stream
         warm-up); returns the frame as an ``np.ndarray`` (HxWx4 RGBA for
-        real/seg, HxW float32 for depth), or ``None`` if none arrived in time.
-        Raises ``KeyError`` (listing available names) if ``name`` is unknown.
+        real/seg, HxW float32 for depth). Returns ``None`` if no frame arrived
+        in time OR if ``fresh=True`` could not be satisfied before the deadline
+        -- a stale frame is never returned dressed up as fresh. Raises
+        ``KeyError`` (listing available names) if ``name`` is unknown.
         """
         view = self._find_camera_view(name)
         deadline = time.monotonic() + max(0.0, timeout_s)
         target = self._last_step_frame_id if fresh else None
+        # A camera under a server-side delay cannot reveal a frame for the
+        # just-stepped state within the step (the feed is intentionally the
+        # delayed past), so demanding frame_id >= target would burn the whole
+        # timeout every call. Drop the fresh requirement for delayed cameras
+        # and serve latest.
+        if target is not None and self._camera_applied_delay.get(name, 0.0) > 0.0:
+            target = None
         while True:
             frame = view.latest_frame
             have = frame is not None
@@ -725,24 +1143,46 @@ class URLabClient:
             if have and fresh_ok:
                 return frame
             if time.monotonic() >= deadline:
-                return frame  # may be None (never arrived) or stale (fresh timed out)
+                # fresh requested but no matching frame arrived: report the
+                # miss as None instead of handing back a stale image.
+                if target is not None and not fresh_ok:
+                    return None
+                return frame  # may be None (never arrived)
             time.sleep(0.002)
 
     def _step_direct(
-        self, n_steps: int, *, observations: str,
+        self,
+        n_steps: int,
+        *,
+        observations: str,
+        include_cameras: "Optional[Dict[str, str]]" = None,
     ) -> Dict[str, Any]:
         per_art: Dict[str, Any] = {}
         for prefix, art in self.articulations.items():
             per_art[prefix] = art._build_step_request(control_mode=None)
 
-        # Cameras are NOT requested inline: they stream over SHM/ZMQ and are
-        # merged into the reply by _attach_streamed_cameras after the step.
-        # The reply's `frame_id` is what a "fresh" query synchronises against.
+        # Cameras stream over SHM/ZMQ by default and are merged into the reply
+        # by _attach_streamed_cameras after the step; the reply's `frame_id` is
+        # what a "fresh" query synchronises against. `include_cameras` here is
+        # non-None only for camera_query="sync", which asks the server to
+        # render and read back inline instead.
         request: Dict[str, Any] = {
             "n_steps": int(n_steps),
             "observations": observations,
             "per_articulation": per_art,
         }
+        # Entity-level external wrenches (URLabEntity.apply_xfrc) ride the step
+        # request keyed by body name. This is the wire half of the feature;
+        # the server must read `entity_xfrc` and stamp d->xfrc_applied for
+        # those bodies (plugin-side work). Until it does the forces have no
+        # effect, but they are no longer silently discarded on the client.
+        if self._pending_entity_xfrc:
+            request["entity_xfrc"] = {
+                name: vec.tolist()
+                for name, vec in self._pending_entity_xfrc.items()
+            }
+        if include_cameras:
+            request["include_cameras"] = include_cameras
         reply = self._rpc("step", request, expected_op="step_ok")
         self._absorb_step_reply(reply)
         # Clear xfrc post-step per MuJoCo semantics
@@ -752,7 +1192,11 @@ class URLabClient:
         return reply
 
     def _step_puppet(
-        self, n_steps: int, *, observations: str,
+        self,
+        n_steps: int,
+        *,
+        observations: str,
+        include_cameras: "Optional[Dict[str, str]]" = None,
     ) -> Dict[str, Any]:
         if mujoco is None:
             raise RuntimeError("mujoco not installed; puppet mode requires it")
@@ -764,12 +1208,39 @@ class URLabClient:
         if n_steps < 0:
             raise ValueError(f"n_steps must be >= 0, got {n_steps}")
 
+        # Pending external wrenches cannot be honoured in puppet mode: the
+        # client's local mj_step is authoritative and UE's d->xfrc_applied is
+        # overwritten by the pushed state every step. Rather than let them sit
+        # in the buffers and silently resurrect on a later mode switch, warn
+        # once and clear them here.
+        if self._pending_entity_xfrc:
+            warnings.warn(
+                "puppet step: dropping pending entity xfrc "
+                f"{sorted(self._pending_entity_xfrc)} (external wrenches are "
+                "inert in puppet mode; the client's mj_step is authoritative).",
+                stacklevel=2,
+            )
+            self._pending_entity_xfrc.clear()
+        stale_art_xfrc = [
+            art.prefix for art in self.articulations.values() if art._pending_xfrc
+        ]
+        if stale_art_xfrc:
+            warnings.warn(
+                f"puppet step: dropping pending articulation xfrc on "
+                f"{stale_art_xfrc} (inert in puppet mode).",
+                stacklevel=2,
+            )
+            for art in self.articulations.values():
+                art.clear_xfrc()
+
         # n_steps == 0: skip mj_step entirely (MJX / manual state authors
         # push whatever they already wrote into client.data).
         for _ in range(int(n_steps)):
             mujoco.mj_step(self.model, self.data)
 
-        # Cameras stream over SHM/ZMQ (see _step_direct); not requested inline.
+        # Cameras stream over SHM/ZMQ (see _step_direct) unless camera_query
+        # was "sync". In puppet mode the server pauses those publishers, so
+        # "sync" is in practice the only policy that yields a frame here.
         request: Dict[str, Any] = {
             "mode": wire(StepMode.PUPPET),
             "n_steps": int(n_steps),
@@ -780,6 +1251,8 @@ class URLabClient:
             "ctrl": np.asarray(self.data.ctrl, dtype=np.float64).tolist(),
             "per_articulation": {},
         }
+        if include_cameras:
+            request["include_cameras"] = include_cameras
         reply = self._rpc("step", request, expected_op="step_ok")
         self._absorb_step_reply(reply)
         return reply
@@ -800,40 +1273,66 @@ class URLabClient:
         # default endpoint before streaming is on; each camera only binds its
         # real (distinct) ZMQ port once enabled, and set_camera_streaming
         # reports it. Subscribing to the stale handshake endpoint sends every
-        # camera to one port, so all but one get no frames.
+        # camera to one port, so all but one get no frames. Global (scene-level)
+        # cameras stream on the same path as per-articulation ones.
         enable: Dict[str, Any] = {}
-        for art in self.articulations.values():
-            for cam_name, view in art.cameras.items():
-                # Only cameras the handshake advertised an endpoint/topic for are
-                # streamable. Skipping the rest also keeps this a no-op (no RPC)
-                # for camera-less / stub-transport scenes.
-                if getattr(view, "_zmq_topic", None) and getattr(view, "_zmq_endpoint", None):
-                    enable[cam_name] = {"zmq": True, "shm": True}
+        for _prefix, cam_name, view in self._iter_all_camera_views():
+            # Only cameras the handshake advertised an endpoint/topic for are
+            # streamable. Skipping the rest also keeps this a no-op (no RPC)
+            # for camera-less / stub-transport scenes.
+            if getattr(view, "_zmq_topic", None) and getattr(view, "_zmq_endpoint", None):
+                enable[cam_name] = {"zmq": True, "shm": True}
         reply: Dict[str, Any] = {}
         if enable:
             try:
                 reply = self.runtime.set_camera_streaming(enable)
             except Exception as exc:  # pragma: no cover - older server / transport
-                logger.debug("set_camera_streaming at stream startup failed: %s", exc)
+                # A failure here means no camera ever streams -- surface it
+                # loudly rather than leaving the user with silent black feeds.
+                logger.warning(
+                    "set_camera_streaming failed at stream startup (%s); "
+                    "camera feeds will not appear until it succeeds", exc,
+                )
         # One per-camera stream; the transport dedupes on (prefix, name).
         # Prefer the endpoint/topic from the set_camera_streaming reply (the
         # bound port); fall back to the handshake values for older servers.
+        for prefix, cam_name, view in self._iter_all_camera_views():
+            info = reply.get(cam_name)
+            if info is not None:
+                if info.zmq_endpoint:
+                    view._zmq_endpoint = info.zmq_endpoint
+                if info.zmq_topic:
+                    view._zmq_topic = info.zmq_topic
+            topic = getattr(view, "_zmq_topic", None)
+            endpoint = getattr(view, "_zmq_endpoint", None)
+            if not topic or not endpoint:
+                continue
+            self._transport.start_camera_stream(
+                prefix, cam_name, endpoint, topic,
+                self._make_camera_callback(prefix, cam_name),
+            )
+
+    def _iter_all_camera_views(self):
+        """Yield ``(stream_prefix, cam_name, view)`` for every discovered
+        camera: per-articulation cameras under the articulation prefix and
+        global (scene-level) cameras under the ``"global"`` prefix. The prefix
+        is only the transport's stream key; ``cam_name`` stays canonical."""
         for art in self.articulations.values():
             for cam_name, view in art.cameras.items():
-                info = reply.get(cam_name)
-                if info is not None:
-                    if info.zmq_endpoint:
-                        view._zmq_endpoint = info.zmq_endpoint
-                    if info.zmq_topic:
-                        view._zmq_topic = info.zmq_topic
-                topic = getattr(view, "_zmq_topic", None)
-                endpoint = getattr(view, "_zmq_endpoint", None)
-                if not topic or not endpoint:
-                    continue
-                self._transport.start_camera_stream(
-                    art.prefix, cam_name, endpoint, topic,
-                    self._make_camera_callback(art.prefix, cam_name),
-                )
+                yield art.prefix, cam_name, view
+        for cam_name, view in self.global_cameras.items():
+            yield "global", cam_name, view
+
+    def _resolve_camera_view(
+        self, prefix: str, cam_name: str
+    ) -> "Optional[URLabCameraView]":
+        """Resolve the live view for a (stream_prefix, cam_name) pair, tolerant
+        of a re-attach that rebuilt the wrapper. ``"global"`` routes to the
+        scene-level camera set."""
+        if prefix == "global":
+            return self.global_cameras.get(cam_name)
+        art = self.articulations.get(prefix)
+        return art.cameras.get(cam_name) if art else None
 
     def _stop_streaming_subs(self) -> None:
         """Tear down all streaming subs. Idempotent."""
@@ -915,7 +1414,14 @@ class URLabClient:
 
     def refresh(self, observations: Union[str, ObservationLevel] = "standard") -> None:
         """Re-run the handshake to pick up scene changes (after spawn/import or
-        an external edit). Idempotent; same wire op as :meth:`connect`."""
+        an external edit). Idempotent; same wire op as :meth:`connect`.
+
+        Note: this rebuilds every ``URLabArticulation`` / ``URLabEntity`` /
+        ``URLabCameraView`` wrapper from the fresh handshake, so any references
+        you held (``art = client.articulation(...)``, ``cam = art.cameras[...]``)
+        are orphaned and keep pointing at the pre-refresh objects. Re-fetch them
+        from ``client.articulations`` / ``client.camera_names`` after a refresh.
+        """
         self.connect(observations=observations)
 
     def articulation(self, prefix: Optional[str] = None) -> "URLabArticulation":
@@ -977,6 +1483,49 @@ class URLabClient:
             sim_dt_applied=sim_dt_applied,
         )
 
+    @staticmethod
+    def _decode_camera_frame(
+        view,
+        pixels: bytes,
+        frame_id: "Optional[int]" = None,
+        sim_time: "Optional[float]" = None,
+        capture_time: "Optional[float]" = None,
+    ) -> bool:
+        """Decode *pixels* into *view*, returning True on success.
+
+        Depth frames are float32 (HxW); colour frames arrive as BGRA8
+        (HxWx4), with REAL mode rotated to RGBA for consumer convenience.
+        On success, updates ``view.latest_frame``, ``frame_count``,
+        ``recv_monotonic``, and any non-``None`` metadata fields.
+        """
+        try:
+            w, h = view.resolution
+            if view.mode == CameraMode.DEPTH:
+                arr = np.frombuffer(pixels, dtype=np.float32)
+                if arr.size != w * h:
+                    return False
+                view.latest_frame = arr.reshape((h, w))
+            else:
+                arr = np.frombuffer(pixels, dtype=np.uint8)
+                if arr.size != w * h * 4:
+                    return False
+                bgra = arr.reshape((h, w, 4))
+                if view.mode == CameraMode.REAL:
+                    view.latest_frame = bgra[..., [2, 1, 0, 3]]
+                else:
+                    view.latest_frame = bgra
+            view.frame_count += 1
+            view.recv_monotonic = time.monotonic()
+            if frame_id is not None:
+                view.frame_id = frame_id
+            if sim_time is not None:
+                view.sim_time = sim_time
+            if capture_time is not None:
+                view.capture_unix_time = capture_time
+            return True
+        except Exception:
+            return False
+
     def _make_camera_callback(self, prefix: str, cam_name: str) -> "Callable[[bytes], None]":
         """Build a frame-bytes callback bound to a specific (prefix, cam)
         URLabCameraView. The closure captures only string keys and resolves
@@ -988,51 +1537,18 @@ class URLabClient:
             sim_time: "Optional[float]" = None,
             capture_time: "Optional[float]" = None,
         ) -> None:
-            art = self.articulations.get(prefix)
-            if not art:
-                return
-            view = art.cameras.get(cam_name)
+            view = self._resolve_camera_view(prefix, cam_name)
             if view is None:
                 return
-            try:
-                w, h = view.resolution
-                decoded = False
-                if view.mode == CameraMode.DEPTH:
-                    # Single-channel PF_R32_FLOAT; one float per pixel.
-                    arr = np.frombuffer(pixels, dtype=np.float32)
-                    if arr.size == w * h:
-                        view.latest_frame = arr.reshape((h, w))
-                        decoded = True
-                else:
-                    # REAL / SEMANTIC / INSTANCE all ship BGRA8. Real
-                    # rotates to RGBA for consumer-friendliness; seg modes
-                    # keep BGRA -- the seg material's tint convention is
-                    # documented per-channel and consumers mapping color
-                    # to class id need the original byte order.
-                    arr = np.frombuffer(pixels, dtype=np.uint8)
-                    if arr.size == w * h * 4:
-                        bgra = arr.reshape((h, w, 4))
-                        if view.mode == CameraMode.REAL:
-                            view.latest_frame = bgra[..., [2, 1, 0, 3]]
-                        else:
-                            view.latest_frame = bgra
-                        decoded = True
-                if decoded:
-                    view.frame_count += 1
-                    view.recv_monotonic = time.monotonic()
-                    # frame_id / sim_time ride the stream header now (both
-                    # transports), so a "fresh" query can wait on the cache
-                    # until view.frame_id >= the step's post-state id. Set
-                    # them together with the pixels so they never diverge.
-                    if frame_id is not None:
-                        view.frame_id = frame_id
-                    if sim_time is not None:
-                        view.sim_time = sim_time
-                    if capture_time is not None:
-                        view.capture_unix_time = capture_time
-            except Exception as exc:
-                logger.debug("camera decode failed (%s/%s): %s",
-                             prefix, cam_name, exc)
+            if not URLabClient._decode_camera_frame(
+                view, pixels,
+                frame_id=frame_id, sim_time=sim_time, capture_time=capture_time,
+            ):
+                logger.debug("camera decode failed (%s/%s)",
+                             prefix, cam_name)
+            else:
+                with self._camera_frame_cond:
+                    self._camera_frame_cond.notify_all()
 
         return _on_frame
 
@@ -1059,6 +1575,19 @@ class URLabClient:
             return set(include_cameras)
         return set()
 
+    def _inline_camera_request(self, include_cameras: Any) -> Dict[str, str]:
+        """Build the wire ``include_cameras`` block for ``camera_query="sync"``.
+
+        The server keys this by camera name with a per-camera capture mode;
+        ``"sync"`` means render now and embed the pixels in the step reply
+        rather than publishing them on a stream. ``True`` expands to every
+        discovered camera, since the wire form has no "all" spelling.
+        """
+        names = self._select_camera_names(include_cameras)
+        if names is None:
+            names = self.camera_names()
+        return {str(name): "sync" for name in names}
+
     def _gather_cached_cameras(self, include_cameras: Any) -> Dict[str, Dict[str, Any]]:
         """Read the latest cached frame off each requested URLabCameraView
         and bundle into a {prefix: {cam_name: {pixels, mode, ...}}} dict.
@@ -1069,24 +1598,20 @@ class URLabClient:
         how fresh the frame is."""
         wanted = self._select_camera_names(include_cameras)
         out: Dict[str, Dict[str, Any]] = {}
-        for prefix, art in self.articulations.items():
-            per_art: Dict[str, Any] = {}
-            for cam_name, view in art.cameras.items():
-                if wanted is not None and cam_name not in wanted:
-                    continue
-                if view.latest_frame is None:
-                    continue
-                mode = view.mode.value if hasattr(view.mode, "value") else str(view.mode)
-                per_art[cam_name] = {
-                    "pixels": view.latest_frame,
-                    "mode": mode,
-                    "resolution": list(view.resolution),
-                    "frame_count": view.frame_count,
-                    "frame_id": view.frame_id,
-                    "sim_time": view.sim_time,
-                }
-            if per_art:
-                out[prefix] = per_art
+        for prefix, cam_name, view in self._iter_all_camera_views():
+            if wanted is not None and cam_name not in wanted:
+                continue
+            if view.latest_frame is None:
+                continue
+            mode = view.mode.value if hasattr(view.mode, "value") else str(view.mode)
+            out.setdefault(prefix, {})[cam_name] = {
+                "pixels": view.latest_frame,
+                "mode": mode,
+                "resolution": list(view.resolution),
+                "frame_count": view.frame_count,
+                "frame_id": view.frame_id,
+                "sim_time": view.sim_time,
+            }
         return out
 
     def _wait_for_camera_frames(
@@ -1099,27 +1624,35 @@ class URLabClient:
         This is the "fresh" guarantee: the monotonic frame_id is stamped when
         the stepped state is pushed to the render snapshot, so a streamed frame
         tagged >= it was rendered from a state at or after this step."""
-        wanted: Optional[set] = None
-        if isinstance(include_cameras, Mapping):
-            wanted = set(include_cameras.keys())
+        # Normalise the selector the same way the gather path does; a list /
+        # tuple / set / str no longer silently degrades to "wait on every
+        # camera" (which made one dormant camera burn the full timeout).
+        wanted = self._select_camera_names(include_cameras)
 
         def _all_fresh() -> bool:
-            for art in self.articulations.values():
-                for cam_name, view in art.cameras.items():
-                    if wanted is not None and cam_name not in wanted:
-                        continue
-                    fid = view.frame_id
-                    if fid is None or fid < target_frame_id:
-                        return False
+            for _prefix, cam_name, view in self._iter_all_camera_views():
+                if wanted is not None and cam_name not in wanted:
+                    continue
+                # A camera under a server-side delay can never reveal a frame
+                # tagged with the just-stepped state within the step, so it
+                # would deadlock the fresh-wait; treat it as satisfied (it is
+                # served "latest", i.e. the delayed past, by design).
+                if self._camera_applied_delay.get(cam_name, 0.0) > 0.0:
+                    continue
+                fid = view.frame_id
+                if fid is None or fid < target_frame_id:
+                    return False
             return True
 
         deadline = time.monotonic() + max(0.0, timeout_s)
-        while True:
-            if _all_fresh():
-                return True
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(0.001)
+        with self._camera_frame_cond:
+            while True:
+                if _all_fresh():
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._camera_frame_cond.wait(timeout=remaining)
 
     def _attach_streamed_cameras(
         self,
@@ -1153,7 +1686,7 @@ class URLabClient:
         keyframe_name: Optional[str] = None,
         seed: Optional[int] = None,
         per_articulation_qpos: Optional[Mapping[str, Mapping[str, float]]] = None,
-    ) -> Dict[str, Any]:
+    ) -> "StepResult":
         """Reset the sim. Returns the raw reset reply, useful for fields
         like ``sim_time``; for state, prefer ``client.data`` and
         articulation accessors."""
@@ -1196,6 +1729,219 @@ class URLabClient:
         self._absorb_step_reply(reply)
         return StepResult(reply)
 
+    # -- network model upload ---------------------------------------------
+
+    def upload_model(
+        self,
+        xml: "Union[str, bytes, os.PathLike]",
+        assets: Optional[Mapping[str, bytes]] = None,
+        *,
+        step_mode: str = "direct",
+        chunk_bytes: int = 4 * 1024 * 1024,
+        asset_root: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Upload an MJCF model to the server over the content-addressed protocol.
+
+        The model is flattened into one self-contained XML (every ``<include>``
+        resolved, every asset ``file=`` rewritten to a bare filename), hashed,
+        and offered to the server via ``upload_model_manifest``. The server
+        checks its cache and asks only for the blobs it is missing; only those
+        are streamed with ``upload_model_chunk`` (chunked at ``chunk_bytes``),
+        then ``upload_model_commit`` compiles the model and returns its
+        dimensions plus the compiled MJB.
+
+        Parameters
+        ----------
+        xml:
+            A filesystem path, an XML string, an XML ``bytes`` blob, or an
+            ``os.PathLike`` to the model's MJCF.
+        assets:
+            Optional mapping of bare filename -> raw bytes. When given it is
+            used verbatim as the asset set (keys must be bare filenames). When
+            ``None`` the referenced ``file=`` assets are read from disk,
+            resolved against ``asset_root`` (or the XML directory + meshdir /
+            texturedir).
+        step_mode:
+            Advisory step mode recorded in the manifest (``"direct"`` default).
+        chunk_bytes:
+            Max bytes per ``upload_model_chunk`` (default 4 MiB). Small blobs
+            are sent as a single chunk.
+        asset_root:
+            Base directory for resolving includes and asset files; overrides the
+            XML's own directory.
+
+        Returns
+        -------
+        dict
+            The ``upload_model_commit_ok`` reply: ``imported``, ``nq`` / ``nv``
+            / ``nu`` / ``nbody`` / ``ngeom``, ``mjb`` (compiled bytes) and
+            ``warnings``.
+
+        Raises
+        ------
+        ValueError
+            On a non-bare asset key, too many assets, or a blob / total that
+            exceeds the server's advertised limits.
+        URLabRPCError
+            If the server rejects the manifest or the commit (e.g.
+            ``import_failed``), carrying the server's code and message.
+        """
+        xml_text, asset_paths = flatten_model(xml, asset_root=asset_root)
+        xml_bytes = xml_text.encode("utf-8")
+
+        blobs = self._gather_upload_assets(assets, asset_paths)
+
+        # Client-side validation before any round-trip (the server enforces the
+        # same rules; failing here is faster and friendlier).
+        for name in blobs:
+            require_bare_filename(name)
+        if len(blobs) > MAX_ASSETS:
+            raise ValueError(
+                f"model references {len(blobs)} assets; the limit is {MAX_ASSETS}"
+            )
+
+        xml_sha = sha256_hex(xml_bytes)
+        asset_shas = {name: sha256_hex(data) for name, data in blobs.items()}
+        asset_manifest = [
+            {"name": name, "sha256": asset_shas[name], "size": len(blobs[name])}
+            for name in blobs
+        ]
+        total_bytes = len(xml_bytes) + sum(len(d) for d in blobs.values())
+
+        manifest = self._rpc(
+            "upload_model_manifest",
+            {
+                "xml_sha256": xml_sha,
+                "assets": asset_manifest,
+                "total_bytes": total_bytes,
+                "step_mode": step_mode,
+            },
+            expected_op="upload_model_manifest_ok",
+        )
+        upload_id = manifest.get("upload_id")
+        if not upload_id:
+            raise URLabRPCError(
+                "bad_manifest",
+                "upload_model_manifest_ok missing upload_id",
+                op="upload_model_manifest",
+            )
+        need_xml = bool(manifest.get("need_xml", True))
+        need_assets = set(manifest.get("need_assets", []) or [])
+        max_asset_bytes = manifest.get("max_asset_bytes")
+        max_total_bytes = manifest.get("max_total_bytes")
+
+        # Enforce the server's advertised ceilings before streaming a byte.
+        if max_total_bytes is not None and total_bytes > int(max_total_bytes):
+            raise ValueError(
+                f"model upload is {total_bytes} bytes, over the server limit of "
+                f"{int(max_total_bytes)}"
+            )
+        if max_asset_bytes is not None:
+            cap = int(max_asset_bytes)
+            if need_xml and len(xml_bytes) > cap:
+                raise ValueError(
+                    f"flattened XML is {len(xml_bytes)} bytes, over the per-blob "
+                    f"limit of {cap}"
+                )
+            for name in need_assets:
+                if name in blobs and len(blobs[name]) > cap:
+                    raise ValueError(
+                        f"asset {name!r} is {len(blobs[name])} bytes, over the "
+                        f"per-blob limit of {cap}"
+                    )
+
+        # Stream only the blobs the server asked for (a cache hit skips them).
+        if need_xml:
+            self._upload_blob(upload_id, "xml", "model.xml", xml_bytes, xml_sha, chunk_bytes)
+        for name in blobs:
+            if name in need_assets:
+                self._upload_blob(
+                    upload_id, "asset", name, blobs[name], asset_shas[name], chunk_bytes
+                )
+
+        return self._rpc(
+            "upload_model_commit",
+            {"upload_id": upload_id},
+            expected_op="upload_model_commit_ok",
+        )
+
+    def upload_model_file(
+        self, path: "Union[str, os.PathLike]", **kwargs: Any
+    ) -> Dict[str, Any]:
+        """Upload an ``.xml`` model file, auto-gathering assets from its directory.
+
+        Thin convenience over :meth:`upload_model`: reads ``path`` and resolves
+        every referenced asset relative to the file's own directory (plus the
+        model's meshdir / texturedir). Accepts the same keyword arguments as
+        :meth:`upload_model` except ``assets`` (assets are always auto-gathered
+        here).
+        """
+        return self.upload_model(os.fspath(path), **kwargs)
+
+    @staticmethod
+    def _gather_upload_assets(
+        assets: Optional[Mapping[str, bytes]],
+        asset_paths: Mapping[str, str],
+    ) -> Dict[str, bytes]:
+        """Return the {bare_name: bytes} blob set for an upload.
+
+        With an explicit ``assets`` mapping the caller's bytes are used
+        verbatim; otherwise every referenced asset is read from its resolved
+        path on disk.
+        """
+        if assets is not None:
+            out: Dict[str, bytes] = {}
+            for name, data in assets.items():
+                if isinstance(data, (bytearray, memoryview)):
+                    data = bytes(data)
+                elif not isinstance(data, bytes):
+                    raise TypeError(
+                        f"asset {name!r} must be bytes, got {type(data).__name__}"
+                    )
+                out[str(name)] = data
+            return out
+        out = {}
+        for bare, abspath in asset_paths.items():
+            if not os.path.isfile(abspath):
+                raise FileNotFoundError(
+                    f"asset {bare!r} referenced by the model was not found at "
+                    f"{abspath!r}; pass assets=... or asset_root=... to locate it"
+                )
+            with open(abspath, "rb") as f:
+                out[bare] = f.read()
+        return out
+
+    def _upload_blob(
+        self,
+        upload_id: str,
+        kind: str,
+        name: str,
+        data: bytes,
+        sha256: str,
+        chunk_bytes: int,
+    ) -> Dict[str, Any]:
+        """Stream one blob to the server in ``chunk_bytes`` slices.
+
+        Returns the final ``upload_model_chunk_ok`` reply. Each chunk carries
+        the blob's full ``sha256`` / ``total`` and its own ``offset`` so the
+        server can reassemble and verify content-addressed."""
+        total = len(data)
+        reply: Dict[str, Any] = {}
+        for offset, chunk in iter_chunks(data, chunk_bytes):
+            reply = self._rpc(
+                "upload_model_chunk",
+                {
+                    "upload_id": upload_id,
+                    "kind": kind,
+                    "name": name,
+                    "sha256": sha256,
+                    "offset": offset,
+                    "total": total,
+                    "data": chunk,
+                },
+                expected_op="upload_model_chunk_ok",
+            )
+        return reply
 
     def _mirror_set_qpos_locally(self, reply: Mapping[str, Any]) -> None:
         if self.model is None or self.data is None:
@@ -1267,6 +2013,15 @@ class URLabClient:
         if self._closed:
             return
         self._closed = True
+        # Release a cooperative farm lease (from URLabPool.lease) so the
+        # instance frees up immediately instead of waiting out its TTL. Best-
+        # effort: swallow any error so close() never raises during teardown.
+        if self.lease_id is not None and self.session_id is not None:
+            try:
+                self._rpc("release_lease", {"lease_id": self.lease_id})
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("URLabClient.close: release_lease failed: %s", exc)
+            self.lease_id = None
         # Revert URLab to live before tearing the transport down. If
         # the client used auto-promote to enter direct/puppet, the server
         # stays in that mode forever once we disconnect (publishers stay
@@ -1292,6 +2047,12 @@ class URLabClient:
             self._transport.close()
         except Exception as exc:  # pragma: no cover - best-effort teardown
             logger.debug("URLabClient.close: transport close failed: %s", exc)
+
+    def release(self) -> None:
+        """Release a farm lease and close the client. Alias of :meth:`close`
+        (which already releases the lease); provided so leased-client call
+        sites read as ``client.release()``."""
+        self.close()
 
     def __enter__(self) -> "URLabClient":
         return self
@@ -1327,7 +2088,7 @@ class URLabClient:
             self.wall_time_nsec = int(wall_t.get("nsec", self.wall_time_nsec))
         self.recv_wall_time_ns = time.time_ns()
 
-        per_art = reply.get("per_articulation") or {}
+        per_art = reply.get("arts") or {}
         for prefix, block in per_art.items():
             art = self.articulations.get(prefix)
             if art is not None:
@@ -1367,52 +2128,47 @@ class URLabClient:
                     pixels = bytes(pixels_obj)
                 else:
                     continue
-                # Find the matching URLabCameraView. Lookup by the
-                # bare camera name across every articulation; in
-                # practice each scene's cameras are name-unique because
-                # the server's ByName map collapses on bare name too.
-                for art in self.articulations.values():
-                    view = art.cameras.get(cam_name)
-                    if view is None:
-                        continue
-                    try:
-                        w, h = view.resolution
-                        if view.mode == CameraMode.DEPTH:
-                            arr = np.frombuffer(pixels, dtype=np.float32)
-                            if arr.size == w * h:
-                                view.latest_frame = arr.reshape((h, w))
-                                view.frame_count += 1
-                                view.sim_time = (
-                                    float(cam_payload["sim_time"])
-                                    if isinstance(cam_payload.get("sim_time"), (int, float))
-                                    else self.sim_time
-                                )
-                                _fid = cam_payload.get("frame_id")
-                                if _fid is not None:
-                                    view.frame_id = int(_fid)
-                        else:
-                            arr = np.frombuffer(pixels, dtype=np.uint8)
-                            if arr.size == w * h * 4:
-                                bgra = arr.reshape((h, w, 4))
-                                if view.mode == CameraMode.REAL:
-                                    view.latest_frame = bgra[..., [2, 1, 0, 3]]
-                                else:
-                                    view.latest_frame = bgra
-                                view.frame_count += 1
-                                view.sim_time = (
-                                    float(cam_payload["sim_time"])
-                                    if isinstance(cam_payload.get("sim_time"), (int, float))
-                                    else self.sim_time
-                                )
-                                _fid = cam_payload.get("frame_id")
-                                if _fid is not None:
-                                    view.frame_id = int(_fid)
-                    except Exception as exc:
-                        logger.debug(
-                            "include_cameras decode failed (%s/%s): %s",
-                            art.prefix, cam_name, exc,
+                # Find the matching URLabCameraView by bare camera name --
+                # per-articulation first, then the global ones. A scene-level
+                # camera (a worldbody <camera> in the imported MJCF) is ONLY
+                # in global_cameras, and an articulations-only lookup dropped
+                # its pixels silently.
+                try:
+                    view = self._find_camera_view(cam_name)
+                except KeyError:
+                    logger.debug("include_cameras: unknown camera %r", cam_name)
+                    continue
+                # Trust the payload's own dimensions over the view's
+                # registered resolution: they are what `pixels` was sized
+                # by, and a view registered at a stale resolution would
+                # otherwise fail the size check and drop a good frame.
+                try:
+                    w = int(cam_payload.get("width") or view.resolution[0])
+                    h = int(cam_payload.get("height") or view.resolution[1])
+                    if view.mode == CameraMode.DEPTH:
+                        arr = np.frombuffer(pixels, dtype=np.float32)
+                        if arr.size != w * h:
+                            raise ValueError(f"expected {w * h} depth samples, got {arr.size}")
+                        view.latest_frame = arr.reshape((h, w))
+                    else:
+                        arr = np.frombuffer(pixels, dtype=np.uint8)
+                        if arr.size != w * h * 4:
+                            raise ValueError(f"expected {w * h * 4} bytes, got {arr.size}")
+                        bgra = arr.reshape((h, w, 4))
+                        view.latest_frame = (
+                            bgra[..., [2, 1, 0, 3]] if view.mode == CameraMode.REAL else bgra
                         )
-                    break
+                    view.frame_count += 1
+                    view.sim_time = (
+                        float(cam_payload["sim_time"])
+                        if isinstance(cam_payload.get("sim_time"), (int, float))
+                        else self.sim_time
+                    )
+                    _fid = cam_payload.get("frame_id")
+                    if _fid is not None:
+                        view.frame_id = int(_fid)
+                except Exception as exc:
+                    logger.debug("include_cameras decode failed (%s): %s", cam_name, exc)
 
         # Non-articulation entities. Write the reply's xpos/xquat into the
         # local MjData at the body's slot so `entity.root_pos_w` /
@@ -1421,7 +2177,7 @@ class URLabClient:
         # runs AFTER `_mirror_state_into_data` (which calls mj_forward over
         # qpos), so we override mj_forward's per-body xpos for
         # non-articulation entities with the wire-shipped value.
-        entity_block = reply.get("entities") or {}
+        entity_block = reply.get("scene") or {}
         for name, block in entity_block.items():
             entity = self.entities.get(name)
             if entity is None or self.data is None or isinstance(entity, _Art):
@@ -1445,7 +2201,7 @@ class URLabClient:
         `mj_forward` at the end is the main reason — it mutates many
         derived fields (xpos, xquat, sensors) inside `data` non-atomically.
         """
-        per_art = reply.get("per_articulation") or {}
+        per_art = reply.get("arts") or {}
         for prefix, block in per_art.items():
             art = self.articulations.get(prefix)
             if art is None:
@@ -1481,6 +2237,28 @@ class URLabClient:
             self.data.time = float(reply["time"])
         if mujoco is not None and self.model is not None and self.data is not None:
             mujoco.mj_forward(self.model, self.data)
+
+
+def _major_minor(version: str) -> str:
+    return ".".join(str(version).split(".")[:2])
+
+
+def _load_xml_with_assets(xml: str, assets: Mapping[str, Any]) -> Tuple[Any, Any]:
+    """Build an MjModel from the handshake's compiled MJCF + VFS assets.
+
+    Version-portable counterpart to `_load_mjb`: XML parses across MuJoCo
+    releases, while an MJB only loads into the exact version that saved it.
+    Asset keys are the bare filenames the server rewrote the `file=` refs to.
+    """
+    if mujoco is None:  # pragma: no cover
+        raise RuntimeError("mujoco not installed")
+    asset_dict = {}
+    for name, blob in (assets or {}).items():
+        if isinstance(blob, (bytearray, memoryview)):
+            blob = bytes(blob)
+        asset_dict[str(name)] = blob
+    model = mujoco.MjModel.from_xml_string(xml, asset_dict)
+    return model, mujoco.MjData(model)
 
 
 def _load_mjb(buf: bytes) -> Tuple[Any, Any]:

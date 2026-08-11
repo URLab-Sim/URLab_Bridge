@@ -47,9 +47,9 @@ def test_control_mode_values():
 
 
 def test_actuator_type_values_match_plan():
-    # Plan section 5.7 enumerates all of these.
+    # Every actuator element MJCF's schema declares.
     expected = {
-        "motor", "position", "velocity", "intvelocity",
+        "general", "motor", "position", "velocity", "intvelocity",
         "damper", "cylinder", "muscle", "adhesion", "dcmotor",
     }
     assert {m.value for m in ActuatorType} == expected

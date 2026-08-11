@@ -106,7 +106,7 @@ def test_state_stream_round_trip(msgpack_mod, tmp_path):
                 "op": "state_full",
                 "time": 1.5,
                 "step": 7,
-                "per_articulation": {"vx300s": {"qpos": [0.1, 0.2]}},
+                "arts": {"vx300s": {"qpos": [0.1, 0.2]}},
             }, use_bin_type=True)
             _publish(state_path, stride, n_buffers, payload)
             assert evt.wait(timeout=2.0), "no snapshot delivered"
@@ -120,7 +120,7 @@ def test_state_stream_round_trip(msgpack_mod, tmp_path):
     assert snap["op"] == "state_full"
     assert snap["time"] == pytest.approx(1.5)
     assert snap["step"] == 7
-    assert "vx300s" in snap["per_articulation"]
+    assert "vx300s" in snap["arts"]
 
 
 def test_state_stream_many_snapshots(msgpack_mod, tmp_path):
@@ -176,6 +176,40 @@ def test_open_timeout_returns_silently(tmp_path):
     time.sleep(0.5)
     transport.stop_state_stream()
     assert received == []
+
+
+def test_rpc_paths_override_decouples_from_stream_dir(tmp_path):
+    """The SHM RPC region (req/rep.shm + kernel events) lives on its own static
+    session, given verbatim by the `shm_rpc` handshake contract, while the
+    camera/state streams stay on the per-PIE stream dir. Pointing RPC at the
+    stream dir is what caused the 5s-per-step stall."""
+    stream_dir = str(tmp_path / "pie-guid-session")
+    rpc_req = str(tmp_path / "live" / "req.shm")
+    rpc_rep = str(tmp_path / "live" / "rep.shm")
+    t = ShmTransport(
+        stream_dir,
+        rpc_req_path=rpc_req,
+        rpc_rep_path=rpc_rep,
+        rpc_req_event="Local\\URLab_live_req_ready",
+        rpc_rep_event="Local\\URLab_live_rep_ready",
+    )
+    assert t._req_path == rpc_req
+    assert t._rep_path == rpc_rep
+    # streams stay on the stream dir
+    assert t._state_path == os.path.join(stream_dir, "state.shm")
+    assert t._req_event_name == "Local\\URLab_live_req_ready"
+    assert t._rep_event_name == "Local\\URLab_live_rep_ready"
+
+
+def test_rpc_paths_default_to_stream_dir_without_contract(tmp_path):
+    """Legacy servers that don't advertise `shm_rpc`: RPC paths derive from
+    shm_dir and event names fall back to the session-id convention."""
+    shm_dir = str(tmp_path)
+    t = ShmTransport(shm_dir)
+    assert t._req_path == os.path.join(shm_dir, "req.shm")
+    assert t._rep_path == os.path.join(shm_dir, "rep.shm")
+    assert t._req_event_name is None
+    assert t._rep_event_name is None
 
 
 def test_close_stops_reader_thread(msgpack_mod, tmp_path):
@@ -482,6 +516,118 @@ def test_rpc_timeout_when_server_silent(msgpack_mod, tmp_path):
     finally:
         os.close(fd_req)
         os.close(fd_rep)
+
+
+from urlab_client.transports import Transport as _Transport
+
+
+class _RecordingFallback(_Transport):
+    """Minimal fallback that records requests and returns a canned reply."""
+
+    def __init__(self, reply=None):
+        self.sent = []
+        self._reply = reply or {"op": "fallback_ok"}
+
+    def rpc(self, req, *, recv_timeout_ms=None):
+        self.sent.append((dict(req), recv_timeout_ms))
+        return self._reply
+
+    def start_state_stream(self, on_snapshot):
+        pass
+
+    def stop_state_stream(self):
+        pass
+
+    def start_camera_stream(self, *a, **kw):
+        pass
+
+    def stop_camera_streams(self):
+        pass
+
+    def close(self, **kw):
+        pass
+
+
+def test_timeout_on_mutating_op_raises_not_resend(msgpack_mod, tmp_path):
+    """A SHM timeout on a mutating op (step) must NOT be transparently resent
+    over the fallback -- the already-signalled request could still execute on a
+    slow-but-alive UE, so a resend would double-step. It raises instead."""
+    from urlab_client.errors import URLabTimeoutError
+
+    req_path = os.path.join(str(tmp_path), "req.shm")
+    rep_path = os.path.join(str(tmp_path), "rep.shm")
+    fd_req = _create_state_shm(req_path, 1024, 2)
+    fd_rep = _create_state_shm(rep_path, 1024, 2)
+    fallback = _RecordingFallback()
+    try:
+        transport = ShmTransport(
+            str(tmp_path), fallback=fallback,
+            poll_interval_s=0.001, open_timeout_s=2.0, rpc_timeout_s=0.3,
+        )
+        try:
+            with pytest.raises(URLabTimeoutError):
+                transport.rpc({"op": "step", "n_steps": 1})
+        finally:
+            transport.close()
+    finally:
+        os.close(fd_req)
+        os.close(fd_rep)
+    # The mutating op was never handed to the fallback.
+    assert fallback.sent == []
+
+
+def test_timeout_on_readonly_op_falls_back(msgpack_mod, tmp_path):
+    """A read-only op (meta) is idempotent, so a SHM timeout may transparently
+    retry it over the fallback, forwarding the caller's recv_timeout_ms."""
+    req_path = os.path.join(str(tmp_path), "req.shm")
+    rep_path = os.path.join(str(tmp_path), "rep.shm")
+    fd_req = _create_state_shm(req_path, 1024, 2)
+    fd_rep = _create_state_shm(rep_path, 1024, 2)
+    fallback = _RecordingFallback({"op": "meta_ok", "ops": []})
+    try:
+        transport = ShmTransport(
+            str(tmp_path), fallback=fallback,
+            poll_interval_s=0.001, open_timeout_s=2.0, rpc_timeout_s=0.3,
+        )
+        try:
+            reply = transport.rpc({"op": "meta"}, recv_timeout_ms=300)
+        finally:
+            transport.close()
+    finally:
+        os.close(fd_req)
+        os.close(fd_rep)
+    assert reply == {"op": "meta_ok", "ops": []}
+    assert len(fallback.sent) == 1
+    assert fallback.sent[0][0]["op"] == "meta"
+    assert fallback.sent[0][1] == 300  # recv_timeout_ms forwarded
+
+
+def test_wrong_transport_reroutes_to_fallback(msgpack_mod, tmp_path):
+    """A `wrong_transport` error (EditorOnly op sent on SHM, UE never executed)
+    reroutes to the fallback, stickily, forwarding recv_timeout_ms."""
+    fallback = _RecordingFallback({"op": "begin_pie_ok", "state": "ready"})
+    server = _ShmEchoServer(
+        msgpack_mod, str(tmp_path),
+        handler=lambda req: {"op": "error", "code": "wrong_transport",
+                             "message": "EditorOnly op on SHM"},
+    )
+    try:
+        transport = ShmTransport(
+            str(tmp_path), fallback=fallback,
+            poll_interval_s=0.0005, open_timeout_s=2.0, rpc_timeout_s=2.0,
+        )
+        try:
+            reply = transport.rpc({"op": "begin_pie"}, recv_timeout_ms=9000)
+            # Sticky: a second call skips SHM entirely.
+            reply2 = transport.rpc({"op": "begin_pie"})
+        finally:
+            transport.close()
+    finally:
+        server.close()
+    assert reply == {"op": "begin_pie_ok", "state": "ready"}
+    assert reply2 == {"op": "begin_pie_ok", "state": "ready"}
+    assert len(fallback.sent) == 2
+    assert fallback.sent[0][1] == 9000  # recv_timeout_ms forwarded on reroute
 
 
 def test_rpc_per_call_timeout_overrides_default(msgpack_mod, tmp_path):

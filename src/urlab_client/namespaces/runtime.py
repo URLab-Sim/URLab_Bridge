@@ -85,7 +85,11 @@ class _RuntimeNamespace(_RpcNamespace):
         - ``{"zmq": bool, "shm": bool}`` — per-transport
 
         Returns ``{canonical: CameraStreamInfo}`` (streaming/zmq/shm/
-        zmq_endpoint/zmq_topic) so you know exactly where to subscribe.
+        zmq_endpoint/zmq_topic). Note ``zmq_endpoint`` is the server *bind*
+        form (e.g. ``tcp://0.0.0.0:NNNN``) and is not directly connectable;
+        pass it through :func:`urlab_client.transports.resolve_endpoint`
+        (against the client's RPC address) before subscribing. ``URLabClient``
+        does this for you; only raw tooling needs to.
         """
         wire: Dict[str, Any] = {}
         for key, val in cameras.items():
@@ -103,6 +107,79 @@ class _RuntimeNamespace(_RpcNamespace):
             expected_op="set_camera_streaming_ok",
         )
         return _camera_streaming_from_wire(reply.get("cameras") or {})
+
+    def set_camera_delay(
+        self,
+        cameras: Mapping[str, Union[float, Mapping[str, Any]]],
+    ) -> "Dict[str, Dict[str, Any]]":
+        """Configure per-camera latency emulation + capture-rate control at runtime.
+
+        Models real-camera staleness: the streamed frame is the newest whose
+        ``capture_time + sampled_delay <= now``, so the feed lags by the
+        configured delay. Applied server-side (UE), so every client / transport
+        sees the already-delayed stream -- no client-side buffering. Keys are
+        canonical camera names (the ``camera_topics`` keys from the handshake).
+
+        Values:
+
+        - ``float`` -- a fixed delay in seconds (other knobs left at default)
+        - mapping with any of:
+
+          - ``delay_s`` (float): base latency, seconds
+          - ``jitter_s`` (float): symmetric uniform half-range; effective delay
+            ~ ``U(delay_s - jitter_s, delay_s + jitter_s)`` clamped >= 0, drawn
+            from a seeded per-camera RNG so it is reproducible
+          - ``clock`` (``"sim"`` | ``"wall"``): measure the delay in SimTime
+            (deterministic, default) or wall-clock (real-latency emulation)
+          - ``seed`` (int): RNG seed for jitter (0 = derive from the name)
+          - ``on_state_change`` (bool): only capture + read back when the physics
+            state advanced -- skips redundant GPU work between steps (default on)
+          - ``max_fps`` (float): optional hard wall-clock cap on capture rate
+            (0 = uncapped)
+
+        ``delay_s=0`` with no jitter restores the zero-latency path. Returns
+        ``{canonical: {delay_s, jitter_s, clock, on_state_change, max_fps}}``
+        echoing the applied config.
+        """
+        wire: Dict[str, Any] = {}
+        for key, val in cameras.items():
+            if isinstance(val, Mapping):
+                entry: Dict[str, Any] = {}
+                if "delay_s" in val:
+                    entry["delay_s"] = float(val["delay_s"])
+                if "jitter_s" in val:
+                    entry["jitter_s"] = float(val["jitter_s"])
+                if "clock" in val:
+                    entry["clock"] = str(val["clock"])
+                if "seed" in val:
+                    entry["seed"] = int(val["seed"])
+                if "on_state_change" in val:
+                    entry["on_state_change"] = bool(val["on_state_change"])
+                if "max_fps" in val:
+                    entry["max_fps"] = float(val["max_fps"])
+                wire[str(key)] = entry
+            else:
+                wire[str(key)] = float(val)
+        reply = self._client._rpc(
+            "set_camera_delay", {"cameras": wire},
+            expected_op="set_camera_delay_ok",
+        )
+        applied = dict(reply.get("cameras") or {})
+        # Track the applied delay per camera so the client's "fresh" wait paths
+        # (get_camera(fresh=True) / step(camera_query="fresh")) know not to block
+        # on a frame that can never reveal for the just-stepped state under a
+        # sim-clock delay. Fall back to the requested value if the server did
+        # not echo delay_s.
+        for name, requested in cameras.items():
+            echoed = applied.get(name)
+            if isinstance(echoed, Mapping) and "delay_s" in echoed:
+                delay = float(echoed["delay_s"])
+            elif isinstance(requested, Mapping):
+                delay = float(requested.get("delay_s", 0.0))
+            else:
+                delay = float(requested)
+            self._client._camera_applied_delay[str(name)] = delay
+        return applied
 
     def set_sim_speed(self, percent: float) -> float:
         reply = self._client._rpc(
@@ -436,3 +513,37 @@ class _RuntimeNamespace(_RpcNamespace):
             "get_contacts", payload, expected_op="get_contacts_ok",
         )
         return _contacts_result_from_wire(reply)
+
+    def claim_control(
+        self, articulation: str, *, ttl_s: float = 0.0, force: bool = False
+    ) -> str:
+        """Claim exclusive write access to an articulation's actuators.
+
+        Returns the owner id (this client's session-scoped source string).
+        ``ttl_s`` is the lease lifetime in seconds; 0 means indefinite
+        (held until ``release_control`` or disconnect). ``force=True``
+        steals the claim from the current owner.
+
+        Raises ``URLabRPCError`` with code ``control_claimed`` when the
+        articulation is already owned by another client.
+        """
+        reply = self._client._rpc(
+            "claim_control",
+            {"articulation": str(articulation), "ttl_s": float(ttl_s),
+             "force": bool(force)},
+            expected_op="claim_control_ok",
+        )
+        return str(reply.get("owner", ""))
+
+    def release_control(self, articulation: str) -> None:
+        """Release a claim on an articulation's actuators.
+
+        No-op when the articulation isn't claimed. Raises
+        ``URLabRPCError`` with code ``not_control_owner`` when another
+        client owns it.
+        """
+        self._client._rpc(
+            "release_control",
+            {"articulation": str(articulation)},
+            expected_op="release_control_ok",
+        )

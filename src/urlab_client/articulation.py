@@ -211,10 +211,23 @@ class URLabCameraView:
         # Stash the per-camera ZMQ endpoint + topic from the handshake so
         # the streaming SUB threads can subscribe in free-running mode.
         # These fields are not part of the dataclass schema (they're
-        # implementation details for the SUB plumbing).
+        # implementation details for the SUB plumbing); read them through the
+        # `zmq_endpoint` / `zmq_topic` properties.
         view._zmq_endpoint = payload.get("zmq_endpoint")
         view._zmq_topic = payload.get("zmq_topic")
         return view
+
+    @property
+    def zmq_endpoint(self) -> Optional[str]:
+        """Server-advertised (bind-form) ZMQ endpoint for this camera's stream,
+        or None before streaming is enabled. Resolve it against the client's
+        RPC address with ``transports.resolve_endpoint`` before connecting."""
+        return getattr(self, "_zmq_endpoint", None)
+
+    @property
+    def zmq_topic(self) -> Optional[str]:
+        """ZMQ SUB topic this camera publishes its frames on, or None."""
+        return getattr(self, "_zmq_topic", None)
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +645,13 @@ class URLabArticulation(URLabEntity):
         # Defer base-class init until we know body_id (resolved during walk).
         self.prefix = prefix
         self.name = prefix  # entity-level alias; matches `entity.name`
+        # The prefix the COMPILED MODEL uses, which is not `prefix`. The server
+        # reports `prefix` from the articulation's ActorId -- stable across
+        # spawns, so topics and control-ownership keys stay put -- while the
+        # model's element names are compiled from the UE object name. Matching
+        # model names against `prefix` finds nothing and leaves an articulation
+        # with no actuators, joints or sensors at all.
+        self.model_prefix = str(handshake.get("actor_name") or prefix)
         self._model = model
         self._data = data
         self._client = client
@@ -750,7 +770,7 @@ class URLabArticulation(URLabEntity):
 
         # ROS-Twist-aligned input: linear xyz + angular xyz + bitfield of
         # active discrete actions. Populated per step from the
-        # `per_articulation[prefix]` reply when UE has a UMjTwistController
+        # `arts[prefix]` reply block when UE has a UMjTwistController
         # attached (auto-spawned on AMjArticulation today). Stays zero
         # otherwise. Use the `twist` property for a flat 6-vec.
         self.twist_linear: np.ndarray = np.zeros(3, dtype=np.float64)
@@ -771,7 +791,7 @@ class URLabArticulation(URLabEntity):
     def _prefix_match(self, name: Optional[str]) -> bool:
         if not name:
             return False
-        return name.startswith(self.prefix + "_") or name == self.prefix
+        return name.startswith(self.model_prefix + "_") or name == self.model_prefix
 
     def _qpos_dim(self) -> int:
         return int(sum(j.qpos_dim for j in self.joints.values()))
@@ -812,7 +832,7 @@ class URLabArticulation(URLabEntity):
 
             # Actuator type from handshake (authored). Handshake key can be
             # the short (unprefixed) or full name — try short first.
-            short = _strip_prefix(name, self.prefix)
+            short = _strip_prefix(name, self.model_prefix)
             type_str = (
                 actuator_types_map.get(short)
                 or actuator_types_map.get(name)
@@ -829,7 +849,7 @@ class URLabArticulation(URLabEntity):
                 id=aid,
                 type=actuator_type,
                 trn_type=trn_type_str,
-                joint=_strip_prefix(joint_name, self.prefix) if joint_name else None,
+                joint=_strip_prefix(joint_name, self.model_prefix) if joint_name else None,
                 ctrlrange=ctrlrange,
                 forcerange=forcerange,
                 gear=gear,
@@ -860,7 +880,7 @@ class URLabArticulation(URLabEntity):
             rng = None
             if bool(model.jnt_limited[jid]):
                 rng = tuple(float(x) for x in model.jnt_range[jid])
-            short = _strip_prefix(name, self.prefix)
+            short = _strip_prefix(name, self.model_prefix)
             self.joints[short] = Joint(
                 name=short,
                 id=jid,
@@ -884,7 +904,7 @@ class URLabArticulation(URLabEntity):
             name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, sid)
             if not self._prefix_match(name):
                 continue
-            short = _strip_prefix(name, self.prefix)
+            short = _strip_prefix(name, self.model_prefix)
             self.sensors[short] = Sensor(
                 name=short,
                 id=sid,
@@ -898,7 +918,7 @@ class URLabArticulation(URLabEntity):
             name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, bid)
             if not self._prefix_match(name):
                 continue
-            short = _strip_prefix(name, self.prefix)
+            short = _strip_prefix(name, self.model_prefix)
             self.bodies[short] = Body(name=short, id=bid)
 
     # -- mj(...) helpers -------------------------------------
@@ -915,10 +935,10 @@ class URLabArticulation(URLabEntity):
         obj = _mj_obj_for_kind(kind)
         # try full name first, then prefixed form
         candidates: List[str] = []
-        if name.startswith(self.prefix + "_") or name == self.prefix:
+        if name.startswith(self.model_prefix + "_") or name == self.model_prefix:
             candidates.append(name)
         else:
-            candidates.append(f"{self.prefix}_{name}")
+            candidates.append(f"{self.model_prefix}_{name}")
             candidates.append(name)
         for candidate in candidates:
             mjid = mujoco.mj_name2id(self._model, obj, candidate)
@@ -1181,7 +1201,7 @@ class URLabArticulation(URLabEntity):
     # -- refresh from step reply -----------------------------------------
 
     def _apply_step_reply(self, block: Mapping[str, Any]) -> None:
-        """Populate local views from a `per_articulation[prefix]` reply block."""
+        """Populate local views from an `arts[prefix]` reply block."""
         # Do NOT write reply ctrl back into self.ctrl_array. ctrl_array is
         # the user's outgoing send buffer (set via set_ctrl()); echoing
         # UE's d->ctrl into it creates a feedback loop in live

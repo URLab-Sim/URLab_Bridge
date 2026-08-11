@@ -60,21 +60,6 @@ class SceneBootstrap(NamedTuple):
     original_level: str
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--regenerate-golden",
-        action="store_true",
-        default=False,
-        help="Rewrite the golden trajectory reference for test_live_golden "
-             "instead of comparing. Run locally against a known-good editor.",
-    )
-
-
-@pytest.fixture
-def regenerate_golden(request):
-    return request.config.getoption("--regenerate-golden")
-
-
 def pytest_collection_modifyitems(config, items):  # noqa: ARG001
     if not LIVE:
         skip = pytest.mark.skip(reason="URLAB_LIVE=1 not set; live-UE tests skipped")
@@ -111,13 +96,12 @@ def _make_client(recv_timeout_ms: int = 120_000):
     """
     from urlab_client import URLabClient
 
-    # The bridge deliberately pins mujoco==3.8.1 (mjlab / mujoco-warp compat)
-    # while the UE plugin may run a newer mujoco (e.g. 3.10.0). Bypass the
-    # version gate and skip the cross-version MJB load so the live suite runs
-    # against the current editor; puppet-mode tests guard on client.model.
+    # The bridge pins mujoco==3.8.1 (mjlab / mujoco-warp compat) while the
+    # UE plugin may run a newer mujoco. The client handles the skew itself
+    # now: the version check warns instead of raising, and an unloadable
+    # MJB falls back to building the model from the compiled XML.
     return URLabClient(
         HOST, step_port=STEP_PORT, recv_timeout_ms=recv_timeout_ms,
-        mujoco_version_check=False, local_model=False,
     )
 
 
@@ -247,6 +231,22 @@ def fresh_live_client():
             pass
 
 
+def _claim_all(client) -> None:
+    """Take control of every articulation the client can see.
+
+    The server refuses actuator writes from a client that holds no claim
+    (`not_control_owner`), which is what `claim_control` exists for. A test
+    driving ctrl or twist is doing exactly what a policy runner does, so it
+    claims the same way; `force` because a previous run that died without
+    releasing would otherwise lock every later one out.
+    """
+    for prefix in list(getattr(client, "articulations", {}) or {}):
+        # Not swallowed: a claim that fails leaves every later write failing
+        # with `not_control_owner`, and the test that reports it is whichever
+        # one happened to run next rather than the one that lost the claim.
+        client.runtime.claim_control(prefix, force=True)
+
+
 @pytest.fixture
 def pie_client(_live_session):
     """Per-test client on the session-bootstrapped scene with PIE on.
@@ -262,6 +262,7 @@ def pie_client(_live_session):
     try:
         client.connect()
         _ensure_pie_for_pie_client(client)
+        _claim_all(client)
         # Clean physics state for every test. reset() preserves the
         # active step mode and articulation count; only qpos/qvel/ctrl
         # snap back to keyframe defaults.

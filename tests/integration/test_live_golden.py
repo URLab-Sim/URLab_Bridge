@@ -17,32 +17,28 @@
 L1 (wire smoke): exercises every namespace + the PIE lifecycle, no
 numerical assertions. Catches RPC-shape and dispatcher regressions.
 
-L2 (numerical golden): replays a seeded ctrl schedule on the golden
-scene in direct mode and asserts qpos/qvel match a checked-in
-trajectory bit-identically (modulo float-precision noise).
+L2 (numerical golden): the reference is stock MuJoCo, computed here,
+not a recording. Two separate questions, since they fail for unrelated
+reasons: does UE compile the model the MJCF describes (handshake model
+vs ``mj_loadXML``, option block included), and does UE step it the way
+MuJoCo would (one ctrl schedule, replayed on both).
 
 Both fixtures require ``URLAB_LIVE=1`` + a running editor on the host
 and port configured in conftest.
-
-Regenerate the trajectory after a deliberate physics change:
-
-    URLAB_LIVE=1 pytest tests/integration/test_live_golden.py::test_numerical_golden \
-        --regenerate-golden
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import mujoco
 import numpy as np
 import pytest
 
-GOLDEN_DIR = Path(__file__).resolve().parent / "_golden"
-GOLDEN_TRAJECTORY = GOLDEN_DIR / "trajectory.npz"
+GOLDEN_SCENE = Path(__file__).resolve().parent.parent / "fixtures" / "golden_scene.xml"
 
-SEED = 42
 N_STEPS = 200
-CTRL_SCALE = 0.4
+TIMESTEP = 0.002
 
 
 # ---------------------------------------------------------------------------
@@ -185,69 +181,125 @@ def test_wire_smoke(golden_session):
 # ---------------------------------------------------------------------------
 
 
-def _run_trajectory(client, n_steps: int, seed: int):
-    """Walk a seeded ctrl schedule on the live golden session and
-    return (qpos[n_steps, nq], qvel[n_steps, nv], sensor[n_steps, ns])."""
+def _ctrl_at(step: int) -> np.ndarray:
+    """Two out-of-phase sinusoids. Smooth and closed-form, so the
+    schedule is reproducible without leaning on a particular numpy RNG
+    version, and so neither joint spends the run against its limit."""
+    t = step * TIMESTEP
+    return np.array([
+        0.6 * np.sin(2.0 * np.pi * 0.5 * t),
+        0.4 * np.sin(2.0 * np.pi * 0.8 * t + 1.0),
+    ])
+
+
+def _run_live(client, n_steps: int):
+    """Walk the ctrl schedule on the live session and return
+    (qpos[n_steps, nq], qvel[n_steps, nv], sensor[n_steps, ns])."""
     art = _only_articulation(client)
     actuator_names = list(art.actuators.keys())
-    n_act = len(actuator_names)
-    rng = np.random.default_rng(seed)
-
-    nq = art.qpos_array.size
-    nv = art.qvel_array.size
     sensor_names = list(art.sensors.keys())
-    ns = sum(art.sensors[n].dim for n in sensor_names)
 
-    qpos = np.empty((n_steps, nq), dtype=np.float64)
-    qvel = np.empty((n_steps, nv), dtype=np.float64)
-    sens = np.empty((n_steps, ns), dtype=np.float64)
+    qpos = np.empty((n_steps, art.qpos_array.size), dtype=np.float64)
+    qvel = np.empty((n_steps, art.qvel_array.size), dtype=np.float64)
+    sens = np.empty((n_steps, sum(art.sensors[n].dim for n in sensor_names)), dtype=np.float64)
 
     client.reset()
     for i in range(n_steps):
-        ctrl = rng.uniform(-CTRL_SCALE, CTRL_SCALE, size=n_act)
-        art.set_ctrl(dict(zip(actuator_names, ctrl)))
+        art.set_ctrl(dict(zip(actuator_names, _ctrl_at(i))))
         client.step(n_steps=1)
         qpos[i] = art.qpos_array
         qvel[i] = art.qvel_array
         offset = 0
         for n in sensor_names:
             sensor = art.sensors[n]
-            width = sensor.dim
-            sens[i, offset : offset + width] = sensor.latest
+            sens[i, offset : offset + sensor.dim] = sensor.latest
+            offset += sensor.dim
+    return qpos, qvel, sens
+
+
+def _run_stock(model, actuator_names, sensor_names, n_steps: int):
+    """The same schedule under ``mj_step``. Slots resolve by name, since
+    UE namespaces every element with the actor prefix."""
+    data = mujoco.MjData(model)
+
+    def _slot(objtype, short):
+        names = [mujoco.mj_id2name(model, objtype, i) for i in range(
+            model.nu if objtype == mujoco.mjtObj.mjOBJ_ACTUATOR else model.nsensor)]
+        hits = [i for i, name in enumerate(names) if name == short or name.endswith("_" + short)]
+        assert len(hits) == 1, f"{short!r} matched {hits} in {names}"
+        return hits[0]
+
+    ctrl_slots = [_slot(mujoco.mjtObj.mjOBJ_ACTUATOR, n) for n in actuator_names]
+    sensor_ids = [_slot(mujoco.mjtObj.mjOBJ_SENSOR, n) for n in sensor_names]
+
+    qpos = np.empty((n_steps, model.nq), dtype=np.float64)
+    qvel = np.empty((n_steps, model.nv), dtype=np.float64)
+    sens = np.empty((n_steps, sum(model.sensor_dim[i] for i in sensor_ids)), dtype=np.float64)
+
+    for i in range(n_steps):
+        ctrl = _ctrl_at(i)
+        for slot, actuator in enumerate(ctrl_slots):
+            data.ctrl[actuator] = ctrl[slot]
+        mujoco.mj_step(model, data)
+        qpos[i] = data.qpos
+        qvel[i] = data.qvel
+        offset = 0
+        for sensor in sensor_ids:
+            width = model.sensor_dim[sensor]
+            adr = model.sensor_adr[sensor]
+            sens[i, offset : offset + width] = data.sensordata[adr : adr + width]
             offset += width
     return qpos, qvel, sens
 
 
-def test_numerical_golden(golden_session, regenerate_golden):
-    """Replay a deterministic trajectory; bit-compare against the golden."""
+def test_compiled_model_matches_stock(golden_session):
+    """The model UE handed over is the model the MJCF describes.
+
+    Reports against the field that carries the difference, rather than
+    as a trajectory that drifts for no stated reason. The option block
+    is included: it is scene-wide state the manager owns.
+    """
+    ue = golden_session.model
+    stock = mujoco.MjModel.from_xml_path(str(GOLDEN_SCENE))
+
+    for field in ("timestep", "integrator", "gravity", "solver", "iterations",
+                  "ls_iterations", "tolerance", "cone", "jacobian", "impratio",
+                  "disableflags", "enableflags", "wind", "density", "viscosity"):
+        theirs, ours = getattr(stock.opt, field), getattr(ue.opt, field)
+        assert np.array_equal(np.asarray(theirs), np.asarray(ours)), \
+            f"mjOption.{field}: stock={theirs} ue={ours}"
+
+    for field in ("nq", "nv", "nu", "nbody", "njnt", "ngeom", "nsensor"):
+        assert getattr(stock, field) == getattr(ue, field), \
+            f"model size {field}: stock={getattr(stock, field)} ue={getattr(ue, field)}"
+
+    for field in ("body_mass", "body_inertia", "body_pos", "body_quat", "dof_damping",
+                  "dof_armature", "jnt_range", "jnt_axis", "actuator_gainprm",
+                  "actuator_biasprm", "actuator_gear", "geom_size", "geom_solref",
+                  "geom_solimp", "geom_friction", "geom_margin"):
+        np.testing.assert_allclose(
+            getattr(ue, field), getattr(stock, field), rtol=1e-12, atol=1e-12,
+            err_msg=f"mjModel.{field} diverged from stock",
+        )
+
+
+def test_numerical_golden(golden_session):
+    """Step the live sim and stock MuJoCo through the same schedule."""
     client = golden_session
-    qpos, qvel, sens = _run_trajectory(client, N_STEPS, SEED)
+    art = _only_articulation(client)
+    actuator_names = list(art.actuators.keys())
+    sensor_names = list(art.sensors.keys())
 
-    if regenerate_golden:
-        GOLDEN_DIR.mkdir(exist_ok=True)
-        np.savez_compressed(
-            GOLDEN_TRAJECTORY,
-            qpos=qpos,
-            qvel=qvel,
-            sens=sens,
-            seed=np.int64(SEED),
-            n_steps=np.int64(N_STEPS),
+    live = _run_live(client, N_STEPS)
+    stock = _run_stock(
+        mujoco.MjModel.from_xml_path(str(GOLDEN_SCENE)),
+        actuator_names, sensor_names, N_STEPS,
+    )
+
+    # Same mj_step over the same model, so the slack is the wire round-trip
+    # and a ULP of ordering; the scene is dissipative, so it stays a floor.
+    for name, mine, theirs in zip(("qpos", "qvel", "sensor"), live, stock):
+        np.testing.assert_allclose(
+            mine, theirs, rtol=1e-9, atol=1e-11,
+            err_msg=f"{name} diverged from stock MuJoCo",
         )
-        pytest.skip(f"regenerated {GOLDEN_TRAJECTORY}")
-
-    if not GOLDEN_TRAJECTORY.is_file():
-        pytest.skip(
-            f"golden trajectory missing at {GOLDEN_TRAJECTORY}; "
-            f"run with --regenerate-golden to create it"
-        )
-
-    golden = np.load(GOLDEN_TRAJECTORY)
-    assert int(golden["seed"]) == SEED, "golden seed drift"
-    assert int(golden["n_steps"]) == N_STEPS, "golden length drift"
-
-    # URLab is mj_step under the hood; trajectory should be byte-identical
-    # to the captured reference. atol leaves headroom for any msgpack
-    # float roundtripping introduced by the wire layer.
-    np.testing.assert_allclose(qpos, golden["qpos"], rtol=1e-10, atol=1e-12)
-    np.testing.assert_allclose(qvel, golden["qvel"], rtol=1e-10, atol=1e-12)
-    np.testing.assert_allclose(sens, golden["sens"], rtol=1e-9, atol=1e-11)

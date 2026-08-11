@@ -45,19 +45,30 @@ from urlab_client import URLabClient, URLabRPCError, StepMode
 
 
 def on_connect(_s=None, _a=None) -> None:
+    """Hand the connect to a worker and return.
+
+    Every RPC in `connect()` runs inline, and the last of them starts a
+    camera's broadcast and opens a SUB socket per camera -- seconds of work
+    against a real robot. On the callback thread that is the UI thread, so the
+    window stops answering for the duration and looks hung.
+    """
     if STATE.is_connected():
         log("already connected"); return
+    if STATE.connecting:
+        log("already connecting"); return
     host = dpg.get_value("host_input") or STATE.host
     port = int(dpg.get_value("port_input") or STATE.step_port)
     mode_str = dpg.get_value("connect_mode_combo") or "auto"
+    STATE.connecting = True
+    log(f"connecting to {host}:{port} ...")
+    threading.Thread(target=_connect_worker, args=(host, port, mode_str),
+                     daemon=True).start()
+
+
+def _connect_worker(host: str, port: int, mode_str: str) -> None:
     try:
-        # TEMP: bypass the exact-string MuJoCo version check + skip the
-        # cross-version MJB load so the dashboard connects to an editor built
-        # from a newer (e.g. main-HEAD 3.10.0) MuJoCo than the bridge venv
-        # pins (3.8.1). Remove once the version check is relaxed to a warning.
         STATE.client = URLabClient(host, step_mode=mode_str, step_port=port,
-                                    recv_timeout_ms=5000,
-                                    mujoco_version_check=False, local_model=False)
+                                    recv_timeout_ms=5000)
         STATE.client.connect()
         STATE.host, STATE.step_port = host, port
         log(f"connected to {host}:{port} session={STATE.client.session_id} "
@@ -66,7 +77,8 @@ def on_connect(_s=None, _a=None) -> None:
         tab_runtime.refresh_articulations_dropdown()
         tab_runtime.refresh_articulation_info()
         tab_policy.refresh_articulations()
-        tab_cameras.ensure_textures()
+        _claim_control(STATE.client)
+        STATE.cameras_dirty = True
         STATE.render_request = True
     except Exception as exc:
         msg = str(exc)
@@ -94,6 +106,8 @@ def on_connect(_s=None, _a=None) -> None:
             except Exception:
                 pass
         STATE.client = None
+    finally:
+        STATE.connecting = False
     _refresh_status()
 
 
@@ -456,6 +470,40 @@ def build_ui(initial_host: str, initial_port: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _claim_control(client) -> None:
+    """Take the control lease on every articulation.
+
+    A step request carries ctrl, and the server refuses ctrl from a client that
+    holds no claim, so without this the Step button answers `not_control_owner`
+    and nothing moves.
+
+    Forced, because the lease is indefinite and is not released by a client that
+    dies holding it: an unclean exit would otherwise lock this UI out of its own
+    scene with no way back short of restarting PIE. The steal is logged, so a
+    policy that loses control says so rather than quietly stopping.
+    """
+    for prefix in list(getattr(client, "articulations", {}) or {}):
+        try:
+            client.runtime.claim_control(prefix, force=True)
+        except URLabRPCError as exc:
+            log(f"claim_control({prefix}) failed [{exc.code}]: {exc.message}",
+                error=True)
+        else:
+            log(f"control claimed on {prefix}")
+
+
+def _note_stall(label: str, started: float, budget_ms: float) -> None:
+    """Report a main-loop stage that held the UI longer than its budget.
+
+    The window belongs to this thread, so anything slow here is a UI that has
+    stopped answering; naming the stage is the difference between "the bridge
+    froze" and a line number.
+    """
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if elapsed_ms >= budget_ms:
+        log(f"UI stall: {label} held the main loop for {elapsed_ms:.0f}ms")
+
+
 def _status_poll_loop() -> None:
     """Refresh the status line every 0.5s. Renderer is NOT touched here:
     GL context is owned by the main thread."""
@@ -480,12 +528,20 @@ def main() -> None:
                         help="step server port (default: 5559)")
     parser.add_argument("--render-fps", type=float, default=15.0,
                         help="continuous render rate when connected (default 15)")
+    parser.add_argument("--stall-ms", type=float, default=250.0,
+                        help="log any UI stage that blocks the main loop for "
+                             "longer than this (default 250)")
+    parser.add_argument("--autoconnect", action="store_true",
+                        help="connect on startup instead of waiting for the button")
     args = parser.parse_args()
 
     build_ui(args.host, args.port)
 
     poll = threading.Thread(target=_status_poll_loop, daemon=True)
     poll.start()
+
+    if args.autoconnect:
+        on_connect()
 
     render_interval = 1.0 / max(args.render_fps, 1.0)
     last_render = 0.0
@@ -510,19 +566,30 @@ def main() -> None:
                 # kill the whole UI loop. Background ops can race PIE
                 # transitions / server restarts and surface transient
                 # transport errors that should just retry next frame.
+                if STATE.cameras_dirty:
+                    STATE.cameras_dirty = False
+                    try:
+                        tab_cameras.ensure_textures()
+                    except Exception as exc:
+                        log(f"camera window setup failed: {exc}", error=True)
+
                 for name, fn in (("scene",   tab_scene.tick),
                                  ("runtime", tab_runtime.tick),
                                  ("cameras", tab_cameras.tick),
                                  ("policy",  tab_policy.tick),
                                  ("debug",   tab_debug.tick)):
+                    stage = time.perf_counter()
                     try:
                         fn()
                     except Exception as exc:
                         log(f"{name}.tick error ({type(exc).__name__}): {exc}",
                             error=True)
+                    _note_stall(f"{name}.tick", stage, args.stall_ms)
                 last_render = now
                 STATE.render_request = False
+            present = time.perf_counter()
             dpg.render_dearpygui_frame()
+            _note_stall("present", present, args.stall_ms)
     finally:
         STATE.stop_poll.set()
         if STATE.is_connected():

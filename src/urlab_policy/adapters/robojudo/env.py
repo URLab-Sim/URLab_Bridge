@@ -37,6 +37,17 @@ import zmq
 from urlab_client import URLabArticulation, URLabClient
 from urlab_client.enums import ObservationLevel, SpaceMode, StepMode, coerce, wire
 
+from ..._state_stream import (
+    StateStream,
+    art_block,
+    art_names,
+    art_qpos,
+    art_qvel,
+    art_sensors,
+    art_twist,
+    free_base_state,
+)
+
 from .joint_specs import (
     G1_12DOF, G1_29DOF, GO2_12DOF,
     G1_12DOF_JOINT_NAMES, G1_29DOF_JOINT_NAMES, GO2_12DOF_JOINT_NAMES,
@@ -81,15 +92,15 @@ except ImportError:  # pragma: no cover
 
 
 class ZmqLink:
-    """Manages ZMQ sockets for the legacy PUB/SUB Unreal transport."""
+    """Manages ZMQ sockets for the streaming PUB/SUB Unreal transport.
+
+    State is read from the canonical `state/full` msgpack snapshot; control
+    is written on the raw ctrl PUB (unchanged)."""
 
     def __init__(self, state_endpoint: str, control_endpoint: str):
         self.ctx = zmq.Context()
 
-        self.state_sub = self.ctx.socket(zmq.SUB)
-        self.state_sub.connect(state_endpoint)
-        self.state_sub.setsockopt_string(zmq.SUBSCRIBE, "")
-        self.state_sub.setsockopt(zmq.RCVTIMEO, 100)
+        self.state = StateStream(self.ctx, state_endpoint)
 
         self.ctrl_pub = self.ctx.socket(zmq.PUB)
         self.ctrl_pub.connect(control_endpoint)
@@ -98,20 +109,13 @@ class ZmqLink:
         logger.info(f"ZMQ state: {state_endpoint}  control: {control_endpoint}")
 
     def set_prefix_filter(self, prefix: str):
-        self.state_sub.setsockopt_string(zmq.UNSUBSCRIBE, "")
-        self.state_sub.setsockopt_string(zmq.SUBSCRIBE, prefix)
-        logger.info(f"ZMQ subscription filtered to prefix: '{prefix}'")
+        # state/full carries every articulation in one snapshot; there is no
+        # per-prefix wire filtering to apply. Kept for call-site compatibility.
+        pass
 
-    def drain(self) -> dict[str, bytes]:
-        latest = {}
-        while True:
-            try:
-                topic = self.state_sub.recv_string(zmq.NOBLOCK)
-                if self.state_sub.getsockopt(zmq.RCVMORE):
-                    latest[topic] = self.state_sub.recv()
-            except zmq.Again:
-                break
-        return latest
+    def snapshot(self) -> "dict | None":
+        """Latest decoded `state/full` snapshot, or None if none yet."""
+        return self.state.drain()
 
     def send_control(self, prefix: str, targets: np.ndarray,
                      actuator_ids: list[int] | None = None):
@@ -136,61 +140,36 @@ class ZmqLink:
         self.ctrl_pub.send_string(json.dumps(gains))
 
     def close(self):
-        self.state_sub.close()
+        self.state.close()
         self.ctrl_pub.close()
         self.ctx.term()
 
 
-def _detect_prefix_and_joints(zmq_link: ZmqLink, expected_joint_names: list[str],
-                              forced_prefix: str = "", timeout: float = 5.0):
-    """Detect articulation prefix + joint-name -> ZMQ-id map by listening
-    to incoming PUB topics. If forced_prefix is set, only matches joints
-    from that articulation; otherwise auto-detects."""
+def _detect_prefix(zmq_link: ZmqLink, forced_prefix: str = "",
+                   timeout: float = 5.0) -> str:
+    """Detect the target articulation prefix from the `state/full` snapshot.
+
+    Returns the forced prefix if given (once the stream confirms it), the
+    sole articulation when there is exactly one, or "" if nothing arrives."""
     if forced_prefix:
         logger.info(f"Using specified articulation prefix: '{forced_prefix}'")
     else:
-        logger.info("Auto-detecting articulation prefix and joint mapping...")
+        logger.info("Auto-detecting articulation prefix from state stream...")
 
-    discovered: dict[str, int] = {}
-    prefix = forced_prefix or None
     start = time.time()
-
     while time.time() - start < timeout:
-        messages = zmq_link.drain()
-        for topic, payload in messages.items():
-            if "/joint/" in topic and len(payload) == 16:
-                jid, _pos, _vel, _acc = struct.unpack("<Ifff", payload)
-                parts = topic.split("/joint/")
-                if len(parts) == 2:
-                    pfx, joint_name = parts
-                    if forced_prefix and pfx != forced_prefix:
-                        continue
-                    discovered[joint_name] = jid
-                    if prefix is None:
-                        prefix = pfx
-                        logger.info(f"  Detected prefix: '{prefix}'")
-
-        if prefix and len(discovered) >= len(expected_joint_names):
-            break
+        names = art_names(zmq_link.snapshot())
+        if names:
+            if forced_prefix:
+                if forced_prefix in names:
+                    return forced_prefix
+            else:
+                logger.info(f"  Detected prefix: '{names[0]}'")
+                return names[0]
         time.sleep(0.05)
 
-    if prefix is None:
-        logger.warning("Could not detect prefix -- no joint data received")
-        return "", {}
-
-    joint_id_map = {}
-    for name in expected_joint_names:
-        if name in discovered:
-            joint_id_map[name] = discovered[name]
-        else:
-            logger.warning(f"  Joint '{name}' not found in ZMQ stream")
-
-    logger.info(f"  Mapped {len(joint_id_map)}/{len(expected_joint_names)} joints")
-    for name, jid in sorted(discovered.items(), key=lambda x: x[1]):
-        matched = "OK" if name in joint_id_map else "UNMAPPED"
-        logger.info(f"    ZMQ ID {jid:2d}: {name} [{matched}]")
-
-    return prefix, joint_id_map
+    logger.warning("Could not detect prefix -- no state snapshot received")
+    return forced_prefix or ""
 
 
 if HAS_ROBOJUDO:
@@ -280,14 +259,15 @@ if HAS_ROBOJUDO:
             self._force_twist = None
 
             forced = getattr(cfg_env, "articulation_prefix", "") or ""
-            self.prefix, self._joint_id_map = _detect_prefix_and_joints(
-                self.zmq, self.joint_names, forced_prefix=forced
-            )
-
-            self._rebuild_zmq_mapping()
+            self.prefix = _detect_prefix(self.zmq, forced_prefix=forced)
 
             self._cfg_env = cfg_env
+            # Ordered actuator short-names (info-socket discovery order) and the
+            # per-DoF index into the art's state/full qpos block.
+            self._ordered_act_names: list[str] = []
+            self._dof_to_stream_idx: list[int] = []
             self._actuator_ids = self._discover_actuator_ids(cfg_env)
+            self._build_stream_mapping()
 
             self.zmq.set_prefix_filter(self.prefix)
 
@@ -297,18 +277,25 @@ if HAS_ROBOJUDO:
                 f"({1.0 / self.control_dt:.0f}Hz)"
             )
 
-        def _rebuild_zmq_mapping(self):
-            self._zmq_id_to_dof = {}
-            for dof_idx, name in enumerate(self.joint_names):
-                if name in self._joint_id_map:
-                    self._zmq_id_to_dof[self._joint_id_map[name]] = dof_idx
+        def _build_stream_mapping(self):
+            """Map each policy DoF to the ordinal of its actuator within the
+            info-socket discovery order. state/full concatenates qpos in that
+            same order, so update() reads qpos[free_offset + ordinal]."""
+            ordinal = {n: k for k, n in enumerate(self._ordered_act_names)}
+            self._dof_to_stream_idx = []
+            for name in self.joint_names:
+                k = ordinal.get(name)
+                if k is None:
+                    k = ordinal.get(name.removesuffix("_joint"), -1)
+                if k < 0:
+                    logger.warning(f"  Joint '{name}' not found in actuator order")
+                self._dof_to_stream_idx.append(k)
 
         def update_dof_cfg(self, override_cfg=None):
             super().update_dof_cfg(override_cfg)
-            if hasattr(self, "_joint_id_map"):
-                self._rebuild_zmq_mapping()
-                if hasattr(self, "_cfg_env"):
-                    self._actuator_ids = self._discover_actuator_ids(self._cfg_env)
+            if hasattr(self, "_cfg_env"):
+                self._actuator_ids = self._discover_actuator_ids(self._cfg_env)
+                self._build_stream_mapping()
                 logger.info(
                     f"DOF config updated -- {self.num_dofs} DOFs, "
                     f"joints: {self.joint_names[:3]}..."
@@ -335,6 +322,11 @@ if HAS_ROBOJUDO:
                             for n, i in zip(names, ids):
                                 short = n.replace(self.prefix + "_", "", 1)
                                 name_to_id[short] = int(i)
+
+                            # Actuator order == state/full joint discovery order.
+                            self._ordered_act_names = [
+                                n for n, _ in sorted(name_to_id.items(), key=lambda kv: kv[1])
+                            ]
 
                             actuator_ids = []
                             for jname in self.joint_names:
@@ -390,32 +382,38 @@ if HAS_ROBOJUDO:
             self.damping = np.asarray(damping)
 
         def update(self, simple=False):
-            messages = self.zmq.drain()
+            snap = self.zmq.snapshot()
+            block = art_block(snap, self.prefix) if snap is not None else None
+            if block is not None:
+                qpos = art_qpos(snap, self.prefix)
+                qvel = art_qvel(snap, self.prefix)
+                # A leading free joint (if any) occupies the head of qpos/qvel;
+                # the actuated joints are the tail, aligned to actuator order.
+                na = len(self._ordered_act_names)
+                qpos_off = max(0, qpos.size - na)
+                qvel_off = max(0, qvel.size - na)
+                for dof_idx, k in enumerate(self._dof_to_stream_idx):
+                    if k < 0:
+                        continue
+                    pi, vi = qpos_off + k, qvel_off + k
+                    if pi < qpos.size:
+                        self._dof_pos[dof_idx] = qpos[pi]
+                    if vi < qvel.size:
+                        self._dof_vel[dof_idx] = qvel[vi]
+                    self._connected = True
 
-            for topic, payload in messages.items():
-                if not topic.startswith(self.prefix):
-                    continue
-
-                if "/joint/" in topic and len(payload) == 16:
-                    zmq_id, pos, vel, _acc = struct.unpack("<Ifff", payload)
-                    if zmq_id in self._zmq_id_to_dof:
-                        dof_idx = self._zmq_id_to_dof[zmq_id]
-                        self._dof_pos[dof_idx] = pos
-                        self._dof_vel[dof_idx] = vel
-                        self._connected = True
-
-                elif "/base_state/" in topic and len(payload) == 52:
-                    vals = struct.unpack("<13f", payload)
-                    quat = np.array(vals[3:7])
-                    pos = np.array(vals[0:3])
-                    lin_vel = np.array(vals[7:10])
-                    ang_vel = np.array(vals[10:13])
-
+                # Root/base state from the leading free joint. qpos/qvel are raw
+                # MuJoCo frame (the retired base_state binary carried the same
+                # slots), matching the state/full sensors, which are raw MuJoCo SI
+                # too; base state is still derived here from qpos/qvel rather than
+                # from framepos/framequat sensors.
+                fb = free_base_state(qpos, qvel)
+                if fb is not None:
+                    pos, quat_xyzw, lin_vel, ang_vel = fb
                     if self.born_place_align:
-                        quat, pos = self.base_align.align_transform(quat, pos)
-
+                        quat_xyzw, pos = self.base_align.align_transform(quat_xyzw, pos)
                     self._base_pos = pos
-                    self._base_quat = quat
+                    self._base_quat = quat_xyzw
                     self._base_lin_vel = lin_vel
                     self._base_ang_vel = ang_vel
                     self._connected = True
@@ -426,29 +424,10 @@ if HAS_ROBOJUDO:
                             f"quat={self._base_quat}, angvel={self._base_ang_vel}"
                         )
 
-                elif "/twist" in topic and len(payload) == 12:
-                    self._twist_cmd = np.array(struct.unpack("<3f", payload))
-
-                elif not simple and "/sensor/" in topic and len(payload) >= 8:
-                    sid, dim = struct.unpack("<II", payload[:8])
-                    expected = 8 + dim * 4
-                    if len(payload) == expected:
-                        vals = np.array(struct.unpack(f"<{dim}f", payload[8:]))
-
-                        if "torso-framepos" in topic and dim == 3:
-                            self._torso_pos = vals.copy()
-                        elif "torso-framequat" in topic and dim == 4:
-                            self._torso_quat = np.array([vals[1], vals[2], vals[3], vals[0]])
-                        elif "pelvis-framepos" in topic and dim == 3:
-                            self._base_pos = vals.copy()
-                        elif "pelvis-framequat" in topic and dim == 4:
-                            self._base_quat = np.array([vals[1], vals[2], vals[3], vals[0]])
-                        elif "gyro" in topic.lower() and dim == 3:
-                            if "torso" in topic.lower():
-                                self._torso_ang_vel = vals.copy()
-                            self._base_ang_vel = vals.copy()
-                        elif "accel" in topic.lower() and dim == 3:
-                            self._base_lin_acc = vals.copy()
+                # Twist command: (linear xyz, angular xyz) -> (lin.x, lin.y, ang.z).
+                tw = art_twist(snap, self.prefix)
+                if tw is not None:
+                    self._twist_cmd = np.array([tw[0], tw[1], tw[5]])
 
             self._last_update = time.time()
 
@@ -514,13 +493,20 @@ class UnrealEnvStandalone:
         return self._connected
 
     def update(self):
-        for topic, payload in self.zmq.drain().items():
-            if "/joint/" in topic and len(payload) == 16:
-                jid, pos, vel, _acc = struct.unpack("<Ifff", payload)
-                if 0 <= jid < self.num_dofs:
-                    self._dof_pos[jid] = pos
-                    self._dof_vel[jid] = vel
-                    self._connected = True
+        snap = self.zmq.snapshot()
+        if snap is None:
+            return
+        prefix = self.prefix or (art_names(snap)[0] if art_names(snap) else "")
+        if not prefix:
+            return
+        self.prefix = prefix
+        qpos = art_qpos(snap, prefix)
+        qvel = art_qvel(snap, prefix)
+        n = min(self.num_dofs, qpos.size, qvel.size)
+        if n > 0:
+            self._dof_pos[:n] = qpos[:n]
+            self._dof_vel[:n] = qvel[:n]
+            self._connected = True
 
     def step(self, pd_target):
         self.zmq.send_control(self.prefix, pd_target)
@@ -694,6 +680,9 @@ if HAS_ROBOJUDO:
                 self.prefix, len(self.art.joints), len(self.art.actuators),
                 len(self.art.sensors),
             )
+
+            self.client.runtime.claim_control(self.prefix)
+            logger.info("URLabRoboJuDoEnv: claimed control of '%s'", self.prefix)
 
             self._dof_to_joint: List[Optional[str]] = []
             self._dof_to_actuator: List[Optional[str]] = []

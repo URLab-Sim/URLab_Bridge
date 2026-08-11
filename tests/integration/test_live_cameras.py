@@ -14,13 +14,16 @@
 
 """Camera capture against a live UE editor.
 
-Covers: include_cameras=True returns frames, frame dtype matches
-camera mode, art.cameras[name].latest_frame is populated.
+The golden scene mounts a ``<camera name="head">`` on link1, so
+``pie_client`` is enough.
 
-The session-bootstrapped golden scene has a ``<camera name="head">``
-mounted on link1, so ``pie_client`` is enough. Tests use the per-
-camera ``"sync"`` flag so they don't race the render thread on the
-first step.
+A frame reaches ``latest_frame`` two ways, tested separately:
+``camera_query="sync"`` renders inside the step, and the async streams
+tick only after ``warmup_cameras`` enables broadcast.
+
+The policy is ``camera_query``. ``include_cameras`` only names cameras;
+its mapping values are discarded, so ``{cam: "sync"}`` reads the
+streams instead.
 """
 
 from __future__ import annotations
@@ -36,30 +39,36 @@ def _articulation_with_camera(client):
     pytest.fail("golden scene should expose at least one camera-bearing articulation")
 
 
-def _capture_one_frame(client, cam_name: str) -> None:
-    """Take a few warmup steps so UE has time to render at least one
-    camera frame, then a sync step so the reply waits for a fresh
-    capture instead of returning the latest-cached (which is None on
-    the first step)."""
-    for _ in range(3):
-        client.step(n_steps=1, include_cameras={cam_name: "latest"})
-    client.step(n_steps=1, include_cameras={cam_name: "sync"})
+def _sole_camera(client):
+    art = _articulation_with_camera(client)
+    return art, next(iter(art.cameras))
 
 
-def test_include_cameras_populates_latest_frame(pie_client):
-    art = _articulation_with_camera(pie_client)
-    cam_name = next(iter(art.cameras))
-    _capture_one_frame(pie_client, cam_name)
+def test_sync_capture_populates_latest_frame(pie_client):
+    art, cam_name = _sole_camera(pie_client)
+    pie_client.step(n_steps=1, include_cameras=[cam_name], camera_query="sync")
     cam = art.cameras[cam_name]
     assert cam.latest_frame is not None
     assert isinstance(cam.latest_frame, np.ndarray)
     assert cam.frame_count >= 1
 
 
+def test_streamed_capture_populates_latest_frame(pie_client):
+    art, cam_name = _sole_camera(pie_client)
+    assert pie_client.warmup_cameras([cam_name], timeout_s=15.0) == [cam_name]
+    cam = art.cameras[cam_name]
+    assert cam.latest_frame is not None
+    delivered = cam.frame_count
+    # The stream keeps feeding the same view, so a "latest" step reads a
+    # cached frame rather than going back to the server for one.
+    pie_client.step(n_steps=1, include_cameras=[cam_name], camera_query="latest")
+    assert cam.latest_frame is not None
+    assert cam.frame_count >= delivered
+
+
 def test_camera_dtype_matches_mode(pie_client):
-    art = _articulation_with_camera(pie_client)
-    cam_name = next(iter(art.cameras))
-    _capture_one_frame(pie_client, cam_name)
+    art, cam_name = _sole_camera(pie_client)
+    pie_client.step(n_steps=1, include_cameras=[cam_name], camera_query="sync")
     cam = art.cameras[cam_name]
     if cam.mode.value == "depth":
         assert cam.latest_frame.dtype == np.float32
@@ -68,3 +77,13 @@ def test_camera_dtype_matches_mode(pie_client):
         # real / semantic / instance — uint8 with 4 channels.
         assert cam.latest_frame.dtype == np.uint8
         assert cam.latest_frame.shape[-1] == 4
+
+
+def test_frame_matches_declared_resolution(pie_client):
+    """A frame that decodes at the wrong size is dropped silently by
+    ``_decode_camera_frame``, so assert the shape the view advertises."""
+    art, cam_name = _sole_camera(pie_client)
+    pie_client.step(n_steps=1, include_cameras=[cam_name], camera_query="sync")
+    cam = art.cameras[cam_name]
+    width, height = cam.resolution
+    assert cam.latest_frame.shape[:2] == (height, width)

@@ -48,7 +48,7 @@ def _step_reply(time: float, step: int):
         "op": "step_ok",
         "time": time,
         "step": step,
-        "per_articulation": {
+        "arts": {
             "vx300s": {
                 "qpos": [0.1, 0.2],
                 "qvel": [0.01, 0.02],

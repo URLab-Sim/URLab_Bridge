@@ -18,7 +18,16 @@ from __future__ import annotations
 
 
 def main() -> None:
-    from urlab_dashboard.app import main as run_dashboard
+    try:
+        from urlab_dashboard.app import main as run_dashboard
+    except ModuleNotFoundError as exc:
+        # The dashboard deps (dearpygui, opencv) live in the `ui` extra, which
+        # a bare `uv sync` does not install. Turn the raw ModuleNotFoundError
+        # into an actionable message instead of a traceback.
+        raise SystemExit(
+            f"urlab-ui needs the dashboard dependencies ({exc.name} is "
+            "missing). Install them with:\n\n    uv sync --extra ui\n"
+        ) from exc
     run_dashboard()
 
 

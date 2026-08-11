@@ -43,7 +43,7 @@ def _minimal_reply():
         "op": "step_ok",
         "time": 0.01,
         "step": 1,
-        "per_articulation": {
+        "arts": {
             "vx300s": {"qpos": [0.1, 0.2], "qvel": [0.0, 0.0]},
             "go2": {"qpos": [0.0], "qvel": [0.0]},
         },
@@ -52,20 +52,20 @@ def _minimal_reply():
 
 def _standard_reply():
     base = _minimal_reply()
-    base["per_articulation"]["vx300s"].update(
+    base["arts"]["vx300s"].update(
         {
             "ctrl": [0.5, -0.1],
             "act": [0.42, 0.0],
             "sensors": {"waist_pos": [0.1], "tip_pos": [0.1, 0.0, 0.05]},
         }
     )
-    base["per_articulation"]["go2"].update({"ctrl": [0.3], "act": [], "sensors": {}})
+    base["arts"]["go2"].update({"ctrl": [0.3], "act": [], "sensors": {}})
     return base
 
 
 def _full_reply():
     base = _standard_reply()
-    base["per_articulation"]["vx300s"].update(
+    base["arts"]["vx300s"].update(
         {
             "bodies": {
                 "vx300s_base_link": {
@@ -130,7 +130,7 @@ def test_full_absorbs_bodies_and_forces(mock_step_server, base_handshake):
 def test_actuator_forces_dict_form(mock_step_server, base_handshake):
     """Server may emit forces as a name->value dict instead of a flat array."""
     reply = _standard_reply()
-    reply["per_articulation"]["vx300s"]["actuator_forces"] = {
+    reply["arts"]["vx300s"]["actuator_forces"] = {
         "waist": 7.7,
         "shoulder": -1.1,
     }

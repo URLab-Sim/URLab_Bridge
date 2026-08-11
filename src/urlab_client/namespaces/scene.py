@@ -179,6 +179,13 @@ class _SceneNamespace(_RpcNamespace):
         XML file stem), so old :class:`URLabBlueprint` handles remain
         valid after a re-import.
         """
+        # ``path`` is resolved on the SERVER host: the UE import factory opens
+        # it from the editor machine's filesystem, so this only works when the
+        # bridge and UE share a filesystem (local / same-host). A planned
+        # network-model feature will let a remote client ship the MJCF XML plus
+        # its VFS asset bytes over the RPC instead of a path, so any render
+        # server can be driven remotely; that upload is owned by a separate
+        # design pass and is intentionally NOT built here.
         reply = self._client._run_editor_job(
             "import_xml",
             {"path": str(path), "force_reimport": bool(force_reimport)},

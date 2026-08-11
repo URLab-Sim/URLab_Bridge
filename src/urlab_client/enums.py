@@ -43,6 +43,9 @@ class StepMode(str, enum.Enum):
 
 
 class ActuatorType(str, enum.Enum):
+    # `<general>` is MJCF's own actuator element, and the one every other kind
+    # is shorthand for -- mjlab's models author it directly.
+    GENERAL = "general"
     MOTOR = "motor"
     POSITION = "position"
     VELOCITY = "velocity"

@@ -28,6 +28,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="tcp://127.0.0.1")
     ap.add_argument("--step-port", type=int, default=5559)
+    ap.add_argument("--mode", default="live", choices=("live", "direct", "keep"),
+                    help="step mode to put the server in first (default live). "
+                         "A camera captures on state change, so in direct mode "
+                         "nothing publishes unless something is stepping; live "
+                         "lets UE advance itself, which is what a latency read "
+                         "wants. 'keep' leaves the server where it is.")
     args = ap.parse_args()
 
     from urlab_client import URLabClient
@@ -40,6 +46,9 @@ def main() -> int:
     if not client.manager_present:
         client.sim.start()
     client.refresh()
+
+    if args.mode != "keep":
+        client.runtime.set_mode(args.mode)
 
     names = client.camera_names()
     if not names:
