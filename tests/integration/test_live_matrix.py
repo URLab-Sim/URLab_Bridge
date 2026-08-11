@@ -37,6 +37,8 @@ import pytest
 
 from urlab_client import StepMode, URLabClient
 
+from .conftest import _claim_all
+
 HOST = os.environ.get("URLAB_HOST", "tcp://127.0.0.1")
 STEP_PORT = int(os.environ.get("URLAB_STEP_PORT", "5559"))
 
@@ -83,6 +85,7 @@ def matrix_client(request, _live_session):
     )
     try:
         client.connect()
+        _claim_all(client)
         # After discover with auto_promote_step_mode (default True),
         # DIRECT / PUPPET have been set on the server. For LIVE we
         # explicitly demote so tests that ran before in DIRECT see

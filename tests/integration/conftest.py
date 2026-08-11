@@ -246,6 +246,22 @@ def fresh_live_client():
             pass
 
 
+def _claim_all(client) -> None:
+    """Take control of every articulation the client can see.
+
+    The server refuses actuator writes from a client that holds no claim
+    (`not_control_owner`), which is what `claim_control` exists for. A test
+    driving ctrl or twist is doing exactly what a policy runner does, so it
+    claims the same way; `force` because a previous run that died without
+    releasing would otherwise lock every later one out.
+    """
+    for prefix in list(getattr(client, "articulations", {}) or {}):
+        try:
+            client.runtime.claim_control(prefix, force=True)
+        except Exception:
+            pass
+
+
 @pytest.fixture
 def pie_client(_live_session):
     """Per-test client on the session-bootstrapped scene with PIE on.
@@ -261,6 +277,7 @@ def pie_client(_live_session):
     try:
         client.connect()
         _ensure_pie_for_pie_client(client)
+        _claim_all(client)
         # Clean physics state for every test. reset() preserves the
         # active step mode and articulation count; only qpos/qvel/ctrl
         # snap back to keyframe defaults.
