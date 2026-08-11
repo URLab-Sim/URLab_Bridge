@@ -12,9 +12,11 @@ dependencies = [
     "numpy>=1.26.0",
     # URLab remote-stepping client (section 6 of plan_remote_stepping.md):
     # MuJoCo version pinned to URLab's submodule build (third_party/MuJoCo
-    # currently at 3.8.1). mismatch is rejected at handshake unless the
-    # caller passes mujoco_version_check=False.
-    "mujoco==3.8.1",
+    # currently at 3.11.1). 3.11.0 is the newest PyPI release, so the pin is
+    # one patch behind the plugin on purpose: the handshake compares
+    # major.minor, and a patch-level skew falls back to the compiled-XML
+    # model rather than the version-locked MJB.
+    "mujoco==3.11.0",
     "msgpack>=1.0.0",
 ]
 
@@ -52,16 +54,15 @@ robojudo = [
     "joblib>=1.3.0",
 ]
 # mjlab eval-time runner.
-# mujoco-warp is pinned to 3.8.1 explicitly: mjlab 1.3.0 (the latest at
-# the time of writing) transitively brings mujoco-warp 3.7.0.1, which
-# references `mujoco.mjtEnableBit.mjENBL_MULTICCD` -- a value that was
-# removed in mujoco 3.8.x. With the bridge pinned to mujoco 3.8.1, the
-# import-time enum lookup fails with AttributeError and the mjlab
-# registry is silently skipped. mujoco-warp 3.8.1 has the matching API.
+# mujoco-warp is pinned explicitly because mjlab transitively brings an
+# older one, which references `mujoco.mjtEnableBit.mjENBL_MULTICCD` -- a
+# value removed in mujoco 3.8.x. With the bridge pinned to mujoco 3.11.0
+# the import-time enum lookup fails with AttributeError and the mjlab
+# registry is silently skipped. mujoco-warp 3.11.0 has the matching API.
 mjlab = [
     "urlab-bridge[policy]",
     "mjlab",
-    "mujoco-warp==3.8.1",
+    "mujoco-warp==3.11.0",
 ]
 dev = [
     "pytest>=9.0.3",
