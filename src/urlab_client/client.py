@@ -77,6 +77,14 @@ _OP_TIMEOUTS_S: Dict[str, float] = {
     "spawn_grid": 60.0,
     "spawn_light": 30.0,
     "duplicate_actor": 30.0,
+    # Allocates a render target and binds a port per camera.
+    "set_camera_streaming": 30.0,
+    # Walk the whole world on the game thread; a populated level outgrows 5s.
+    "list_actors": 30.0,
+    "find_actors": 30.0,
+    "get_actor_bounds": 30.0,
+    "actor_hierarchy": 30.0,
+    "snapshot": 30.0,
 }
 
 

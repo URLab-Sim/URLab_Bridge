@@ -45,11 +45,27 @@ from urlab_client import URLabClient, URLabRPCError, StepMode
 
 
 def on_connect(_s=None, _a=None) -> None:
+    """Hand the connect to a worker and return.
+
+    Every RPC in `connect()` runs inline, and the last of them starts a
+    camera's broadcast and opens a SUB socket per camera -- seconds of work
+    against a real robot. On the callback thread that is the UI thread, so the
+    window stops answering for the duration and looks hung.
+    """
     if STATE.is_connected():
         log("already connected"); return
+    if STATE.connecting:
+        log("already connecting"); return
     host = dpg.get_value("host_input") or STATE.host
     port = int(dpg.get_value("port_input") or STATE.step_port)
     mode_str = dpg.get_value("connect_mode_combo") or "auto"
+    STATE.connecting = True
+    log(f"connecting to {host}:{port} ...")
+    threading.Thread(target=_connect_worker, args=(host, port, mode_str),
+                     daemon=True).start()
+
+
+def _connect_worker(host: str, port: int, mode_str: str) -> None:
     try:
         STATE.client = URLabClient(host, step_mode=mode_str, step_port=port,
                                     recv_timeout_ms=5000)
@@ -61,7 +77,7 @@ def on_connect(_s=None, _a=None) -> None:
         tab_runtime.refresh_articulations_dropdown()
         tab_runtime.refresh_articulation_info()
         tab_policy.refresh_articulations()
-        tab_cameras.ensure_textures()
+        STATE.cameras_dirty = True
         STATE.render_request = True
     except Exception as exc:
         msg = str(exc)
@@ -89,6 +105,8 @@ def on_connect(_s=None, _a=None) -> None:
             except Exception:
                 pass
         STATE.client = None
+    finally:
+        STATE.connecting = False
     _refresh_status()
 
 
@@ -505,6 +523,13 @@ def main() -> None:
                 # kill the whole UI loop. Background ops can race PIE
                 # transitions / server restarts and surface transient
                 # transport errors that should just retry next frame.
+                if STATE.cameras_dirty:
+                    STATE.cameras_dirty = False
+                    try:
+                        tab_cameras.ensure_textures()
+                    except Exception as exc:
+                        log(f"camera window setup failed: {exc}", error=True)
+
                 for name, fn in (("scene",   tab_scene.tick),
                                  ("runtime", tab_runtime.tick),
                                  ("cameras", tab_cameras.tick),

@@ -74,6 +74,16 @@ class AppState:
     # in the always-visible status row.
     pie_state: Optional[str] = None
 
+    # Raised off-thread when the live camera set may have changed. The windows
+    # are OpenCV's, and it pumps them from the main loop, so they are opened
+    # there too rather than wherever the discovery happened to land.
+    cameras_dirty: bool = False
+
+    # Set while the connect worker is in flight, so a second click on Connect
+    # does not start a second handshake -- each one rotates the server session
+    # and evicts the other.
+    connecting: bool = False
+
     # Render flags
     render_request: bool = False
 
