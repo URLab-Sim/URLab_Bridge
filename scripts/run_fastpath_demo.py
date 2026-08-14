@@ -31,6 +31,7 @@ import numpy as np
 
 try:
     import mujoco
+    import mujoco.viewer
 except ImportError:  # pragma: no cover
     sys.exit("this demo needs `mujoco` (pip install mujoco, matching your UE minor version)")
 
@@ -60,6 +61,8 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=5561, help="transform-bus PUB port")
     ap.add_argument("--hz", type=float, default=60.0, help="broadcast rate")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-view", dest="view", action="store_false",
+                    help="don't open the native MuJoCo viewer (headless broadcast only)")
     args = ap.parse_args()
 
     make_mjb(args.scene, args.mjb)
@@ -80,7 +83,15 @@ def main() -> None:
     print(f"    MjbFilePath = {args.mjb}")
     print(f"    BusEndpoint = tcp://127.0.0.1:{args.port}")
     print("    bTestSweep  = false")
-    print("then press Play.  Ctrl-C here to stop.\n")
+    print("then press Play.  Ctrl-C here to stop.")
+    if args.view:
+        print("The native MuJoCo viewer (ground truth) opens next to compare "
+              "side by side with the UE fast path.")
+    print()
+
+    # Native MuJoCo viewer alongside the UE fast path, both driven by this one
+    # owner sim -- so the two renders can be compared side by side.
+    viewer = mujoco.viewer.launch_passive(model, data) if args.view else None
 
     # Random-control ranges: use ctrlrange where limited, else a modest default.
     lo = model.actuator_ctrlrange[:, 0].astype(np.float64).copy()
@@ -93,7 +104,7 @@ def main() -> None:
     quat = np.zeros(4)
     frame = 0
     try:
-        while True:
+        while viewer is None or viewer.is_running():
             if model.nu:
                 data.ctrl[:] = rng.uniform(lo, hi)
             mujoco.mj_step(model, data)
@@ -109,6 +120,8 @@ def main() -> None:
             transport.publish_geoms(
                 {"f": frame, "xpos": xpos.tolist(), "xquat": xquat.tolist()}
             )
+            if viewer is not None:
+                viewer.sync()  # native MuJoCo viewer = ground truth, side by side
             frame += 1
             if frame % 120 == 0:
                 print(f"[owner] step {frame}  sim_t={data.time:.2f}s")
@@ -116,6 +129,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[owner] stopping")
     finally:
+        if viewer is not None:
+            viewer.close()
         transport.close()
 
 
