@@ -105,6 +105,9 @@ class FastPathOwner:
             self._registry_dir, f"fastpath_{self._instance_id}_{self._pid}.json"
         )
         self._last_registry_write = 0.0
+        # Pending external perturbations from renderers: body id -> 6-vector
+        # (fx,fy,fz,tx,ty,tz) in MuJoCo world frame. Drained by the owner each step.
+        self._perturb: dict[int, list[float]] = {}
         self._write_registry()
 
     # -- properties --------------------------------------------------------- #
@@ -181,9 +184,31 @@ class FastPathOwner:
                 "mjb": self._mjb,
             }
             return msgpack.packb(reply, use_bin_type=True)
+        if op == "fastpath_perturb":
+            # A renderer pushes an external force/torque on a body. Accumulate it;
+            # the owner applies it to xfrc_applied on its next step.
+            try:
+                body = int(req.get("body", -1))
+                force = [float(x) for x in req.get("force", [0, 0, 0])][:3]
+                torque = [float(x) for x in req.get("torque", [0, 0, 0])][:3]
+                if body >= 0:
+                    acc = self._perturb.setdefault(body, [0.0] * 6)
+                    for i in range(3):
+                        acc[i] += force[i]
+                        acc[i + 3] += torque[i]
+                return msgpack.packb({"ok": True}, use_bin_type=True)
+            except (TypeError, ValueError):
+                return msgpack.packb({"error": "bad perturb"}, use_bin_type=True)
         return msgpack.packb(
             {"error": f"unknown op {op!r}"}, use_bin_type=True
         )
+
+    def drain_perturbations(self) -> dict:
+        """Return the accumulated {body_id: 6-vector} perturbations and clear
+        them. Apply the result to ``data.xfrc_applied`` before the next step."""
+        perts = self._perturb
+        self._perturb = {}
+        return perts
 
     # -- transform bus ------------------------------------------------------ #
     def publish_geoms(self, frame: int, xpos, xquat) -> None:

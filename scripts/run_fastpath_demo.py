@@ -125,11 +125,21 @@ def main() -> None:
     frame = 0
     try:
         while viewer is None or viewer.is_running():
-            # Answer any renderer that just connected (serves the MJB + bus).
+            # Answer any renderer that just connected (serves the MJB + bus) and
+            # collect any external forces a renderer pushed back.
             owner.serve_pending()
 
             if model.nu:
                 data.ctrl[:] = rng.uniform(lo, hi)
+
+            # Apply renderer-sent perturbations as body external forces for this
+            # step, then clear (transient impulse; a sustained drag resends).
+            perts = owner.drain_perturbations()
+            data.xfrc_applied[:] = 0.0
+            for body_id, ft in perts.items():
+                if 0 <= body_id < model.nbody:
+                    data.xfrc_applied[body_id] = ft
+
             for _ in range(n_sub):
                 mujoco.mj_step(model, data)
 
