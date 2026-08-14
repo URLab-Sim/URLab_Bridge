@@ -1266,17 +1266,29 @@ class URLabClient:
         # Owner broadcast: fan the just-pushed kinematics out to any viewers,
         # synced to this step (the client is the authority in puppet mode). The
         # render-server RPC below is unchanged; viewers are a parallel PUB.
+        #
+        # Best-effort ONLY: a viewer-side problem (port already bound, missing
+        # zmq/msgpack) must never break the owner's authoritative step loop, so
+        # any error disables the broadcast and warns once rather than raising.
         if self.broadcast_viewers:
-            if not self._viewer_bcast_bound:
-                self._transport.enable_viewer_broadcast(self.viewer_port)
-                self._viewer_bcast_bound = True
-            self._transport.publish_viewer_state(
-                {
-                    "t": request["time"],
-                    "qpos": request["qpos"],
-                    "qvel": request["qvel"],
-                }
-            )
+            try:
+                if not self._viewer_bcast_bound:
+                    self._transport.enable_viewer_broadcast(self.viewer_port)
+                    self._viewer_bcast_bound = True
+                self._transport.publish_viewer_state(
+                    {
+                        "t": request["time"],
+                        "qpos": request["qpos"],
+                        "qvel": request["qvel"],
+                    }
+                )
+            except Exception as exc:
+                warnings.warn(
+                    f"viewer broadcast disabled after error on port "
+                    f"{self.viewer_port}: {exc}",
+                    stacklevel=2,
+                )
+                self.broadcast_viewers = False
 
         reply = self._rpc("step", request, expected_op="step_ok")
         self._absorb_step_reply(reply)
