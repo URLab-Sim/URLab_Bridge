@@ -186,6 +186,11 @@ class Transport(ABC):
         No-op until :meth:`enable_viewer_broadcast` has bound the PUB."""
         return None
 
+    def publish_geoms(self, payload: Mapping[str, Any]) -> None:
+        """Broadcast one per-geom world-transform frame (``{xpos, xquat}``) to
+        fast-path renderers on topic ``geoms``. No-op until the PUB is bound."""
+        return None
+
 
 def make_transport(
     name: str,

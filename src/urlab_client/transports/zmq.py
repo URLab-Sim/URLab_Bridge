@@ -363,6 +363,7 @@ class ZmqTransport(Transport):
     # Topic every viewer subscribes to. A bare prefix keeps the wire format
     # trivial: [topic, msgpack({"t","qpos","qvel"})].
     _VIEWER_TOPIC = b"viewer"
+    _GEOMS_TOPIC = b"geoms"
 
     def enable_viewer_broadcast(self, port: int) -> Optional[str]:
         if zmq is None:
@@ -399,6 +400,21 @@ class ZmqTransport(Transport):
                 )
             except Exception as exc:  # pragma: no cover - best-effort broadcast
                 logger.debug("viewer publish dropped: %s", exc)
+
+    def publish_geoms(self, payload: Mapping[str, Any]) -> None:
+        # Per-geom world transforms for fast-path renderers. Shares the viewer
+        # PUB socket, distinguished by the "geoms" topic.
+        with self._sock_lock:
+            pub = self._viewer_pub
+            if pub is None:
+                return
+            try:
+                pub.send_multipart(
+                    [self._GEOMS_TOPIC, msgpack.packb(dict(payload), use_bin_type=True)],
+                    flags=zmq.NOBLOCK,
+                )
+            except Exception as exc:  # pragma: no cover - best-effort broadcast
+                logger.debug("geom publish dropped: %s", exc)
 
     # -- lifecycle --------------------------------------------------------
 
