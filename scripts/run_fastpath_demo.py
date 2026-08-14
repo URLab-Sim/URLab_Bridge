@@ -40,10 +40,14 @@ sys.path.insert(0, os.path.join(_HERE, "..", "src"))
 from urlab_client.fastpath_owner import FastPathOwner  # noqa: E402
 
 # Fork-linked toolchain that produces a UE-loadable (version-matched) MJB.
-_REPO = "/home/buzz/Documents/urlab_debug"
-_MJBCOMPILE = os.path.join(_REPO, "mjb_test", "mjbcompile")
-_MJLIB = os.path.join(_REPO, "UnrealRoboticsLab", "third_party", "install", "MuJoCo", "lib")
-_SYSLIB = "/usr/lib/x86_64-linux-gnu"
+# Machine-specific paths come from env vars so this runs unchanged on another box
+# (see docs/fast_path_render.md). Defaults match the original dev layout.
+_REPO = os.environ.get("URLAB_ROOT", "/home/buzz/Documents/urlab_debug")
+_MJBCOMPILE = os.environ.get("URLAB_MJBCOMPILE", os.path.join(_REPO, "mjb_test", "mjbcompile"))
+_MJLIB = os.environ.get(
+    "URLAB_MJLIB",
+    os.path.join(_REPO, "UnrealRoboticsLab", "third_party", "install", "MuJoCo", "lib"))
+_SYSLIB = os.environ.get("URLAB_SYSLIB", "/usr/lib/x86_64-linux-gnu")
 
 
 def make_mjb(scene_xml: str, out_mjb: str) -> None:
