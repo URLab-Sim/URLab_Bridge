@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "src"))
-from urlab_client.transports.zmq import ZmqTransport  # noqa: E402
+from urlab_client.fastpath_owner import FastPathOwner  # noqa: E402
 
 # Fork-linked toolchain that produces a UE-loadable (version-matched) MJB.
 _REPO = "/home/buzz/Documents/urlab_debug"
@@ -59,6 +59,8 @@ def main() -> None:
     ap.add_argument("scene", help="path to a MuJoCo scene.xml (e.g. a menagerie scene)")
     ap.add_argument("--mjb", default="/tmp/urlab_fastpath.mjb", help="MJB path the UE renderer loads")
     ap.add_argument("--port", type=int, default=5561, help="transform-bus PUB port")
+    ap.add_argument("--control-port", type=int, default=5571,
+                    help="fast-path control REQ/REP port (serves the MJB, advertises)")
     ap.add_argument("--hz", type=float, default=60.0, help="broadcast rate")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-view", dest="view", action="store_false",
@@ -71,19 +73,30 @@ def main() -> None:
     mujoco.mj_forward(model, data)
     rng = np.random.default_rng(args.seed)
 
-    transport = ZmqTransport("tcp://localhost")
-    endpoint = transport.enable_viewer_broadcast(args.port)
+    # Own the model as a fast-path owner: serve its MJB on request, advertise in
+    # the registry, and publish the geoms transform bus. The renderer discovers
+    # us and pulls the MJB over the wire -- no shared file path needed.
+    with open(args.mjb, "rb") as fh:
+        mjb_bytes = fh.read()
+    scene_id = os.path.splitext(os.path.basename(args.scene))[0]
+    owner = FastPathOwner(
+        mjb_bytes,
+        scene=scene_id,
+        control_port=args.control_port,
+        bus_port=args.port,
+        ngeom=model.ngeom,
+    )
 
     print(f"[owner] scene={args.scene}")
     print(f"[owner] nbody={model.nbody} ngeom={model.ngeom} nu={model.nu} nmesh={model.nmesh}")
-    print(f"[owner] MJB written -> {args.mjb}")
-    print(f"[owner] broadcasting per-geom transforms on {endpoint} (topic 'geoms')")
+    print(f"[owner] advertising as '{scene_id}' in the registry")
+    print(f"[owner] control (serves MJB): {owner.control_endpoint}")
+    print(f"[owner] transform bus:        {owner.bus_endpoint} (topic 'geoms')")
     print()
-    print("In UE (URLab plugin), add an AMjbScene actor and set:")
-    print(f"    MjbFilePath = {args.mjb}")
-    print(f"    BusEndpoint = tcp://127.0.0.1:{args.port}")
-    print("    bTestSweep  = false")
-    print("then press Play.  Ctrl-C here to stop.")
+    print("A UE fast-path renderer discovers this automatically (server browser")
+    print("or -URLabFastConnect). To connect explicitly, point it at the control")
+    print(f"endpoint: {owner.control_endpoint}")
+    print("Ctrl-C here to stop.")
     if args.view:
         print("The native MuJoCo viewer (ground truth) opens next to compare "
               "side by side with the UE fast path.")
@@ -112,6 +125,9 @@ def main() -> None:
     frame = 0
     try:
         while viewer is None or viewer.is_running():
+            # Answer any renderer that just connected (serves the MJB + bus).
+            owner.serve_pending()
+
             if model.nu:
                 data.ctrl[:] = rng.uniform(lo, hi)
             for _ in range(n_sub):
@@ -125,9 +141,7 @@ def main() -> None:
                 mujoco.mju_mat2Quat(quat, gx[g])
                 xquat[4 * g : 4 * g + 4] = quat
 
-            transport.publish_geoms(
-                {"f": frame, "xpos": xpos.tolist(), "xquat": xquat.tolist()}
-            )
+            owner.publish_geoms(frame, xpos, xquat)
             if viewer is not None:
                 viewer.sync()  # native MuJoCo viewer = ground truth, side by side
             frame += 1
@@ -139,7 +153,7 @@ def main() -> None:
     finally:
         if viewer is not None:
             viewer.close()
-        transport.close()
+        owner.close()
 
 
 if __name__ == "__main__":
