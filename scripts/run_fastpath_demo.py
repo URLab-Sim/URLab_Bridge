@@ -100,14 +100,22 @@ def main() -> None:
     lo[unlim] = -1.0
     hi[unlim] = 1.0
 
+    # Broadcast at args.hz, but advance a real dt of sim each frame. mj_step only
+    # advances model.opt.timestep (e.g. 2ms), so a single step per 1/60s frame
+    # would crawl at ~0.12x real-time. Substep round(dt/timestep) times so the
+    # motion runs at wall-clock speed.
     dt = 1.0 / args.hz
+    n_sub = max(1, round(dt / model.opt.timestep))
+    print(f"[owner] rate: {args.hz:.0f} Hz broadcast, timestep={model.opt.timestep*1e3:.1f} ms, "
+          f"{n_sub} steps/frame (~real-time)")
     quat = np.zeros(4)
     frame = 0
     try:
         while viewer is None or viewer.is_running():
             if model.nu:
                 data.ctrl[:] = rng.uniform(lo, hi)
-            mujoco.mj_step(model, data)
+            for _ in range(n_sub):
+                mujoco.mj_step(model, data)
 
             # Per-geom world transforms: position + quat (from the 3x3 xmat).
             xpos = np.asarray(data.geom_xpos, dtype=np.float64).reshape(-1)
