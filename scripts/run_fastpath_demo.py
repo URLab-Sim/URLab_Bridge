@@ -151,7 +151,18 @@ def main() -> None:
                 mujoco.mju_mat2Quat(quat, gx[g])
                 xquat[4 * g : 4 * g + 4] = quat
 
-            owner.publish_geoms(frame, xpos, xquat)
+            # Per-camera world transforms, so a render-server renderer's cameras
+            # track moving bodies.
+            cxpos = cxquat = None
+            if model.ncam:
+                cxpos = np.asarray(data.cam_xpos, dtype=np.float64).reshape(-1)
+                cx = np.asarray(data.cam_xmat, dtype=np.float64).reshape(model.ncam, 9)
+                cxquat = np.empty(model.ncam * 4, dtype=np.float64)
+                for c in range(model.ncam):
+                    mujoco.mju_mat2Quat(quat, cx[c])
+                    cxquat[4 * c : 4 * c + 4] = quat
+
+            owner.publish_geoms(frame, xpos, xquat, cxpos, cxquat)
             if viewer is not None:
                 viewer.sync()  # native MuJoCo viewer = ground truth, side by side
             frame += 1

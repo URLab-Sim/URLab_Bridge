@@ -211,12 +211,17 @@ class FastPathOwner:
         return perts
 
     # -- transform bus ------------------------------------------------------ #
-    def publish_geoms(self, frame: int, xpos, xquat) -> None:
+    def publish_geoms(self, frame: int, xpos, xquat, cxpos=None, cxquat=None) -> None:
         """Publish one per-geom transform frame on the ``geoms`` topic.
 
         xpos is a flat length-3*ngeom sequence, xquat length-4*ngeom (wxyz).
+        cxpos/cxquat, when given, are the per-camera world transforms (3*ncam and
+        4*ncam wxyz) so streamed cameras track moving bodies.
         """
         payload = {"f": int(frame), "xpos": list(xpos), "xquat": list(xquat)}
+        if cxpos is not None and cxquat is not None:
+            payload["cxpos"] = list(cxpos)
+            payload["cxquat"] = list(cxquat)
         try:
             self._pub.send_multipart(
                 [b"geoms", msgpack.packb(payload, use_bin_type=True)],
