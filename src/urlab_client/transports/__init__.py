@@ -169,6 +169,23 @@ class Transport(ABC):
     def close(self) -> None:
         """Stop all streams and close the RPC channel. Idempotent."""
 
+    # -- viewer bus (owner -> viewers) ------------------------------------
+    # The owner of the simulation (the puppet client here) broadcasts one raw
+    # kinematics frame per step onto a PUB socket that any number of read-only
+    # viewers subscribe to. Default no-ops so a transport that has no viewer
+    # PUB (SHM, in-process) is safe to call unconditionally; ZmqTransport
+    # overrides them.
+
+    def enable_viewer_broadcast(self, port: int) -> Optional[str]:
+        """Bind the viewer PUB on ``port`` and return its endpoint, or None if
+        this transport cannot broadcast. Idempotent."""
+        return None
+
+    def publish_viewer_state(self, payload: Mapping[str, Any]) -> None:
+        """Broadcast one owner-authored frame (``{t, qpos, qvel}``) to viewers.
+        No-op until :meth:`enable_viewer_broadcast` has bound the PUB."""
+        return None
+
 
 def make_transport(
     name: str,

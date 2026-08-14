@@ -142,11 +142,20 @@ class URLabClient:
         transport: Union[str, Transport] = "auto",
         shm_dir: Optional[str] = None,
         puppet_drift_check: str = "warn",
+        broadcast_viewers: bool = False,
+        viewer_port: int = 5560,
     ):
         self.address = address
         self.step_mode: StepMode = coerce(StepMode, step_mode, default=StepMode.AUTO)
         self.step_port = step_port
         self.state_port = state_port
+        # When True, the owner (this client) re-broadcasts the raw {t,qpos,qvel}
+        # it pushes each step onto a PUB so any number of read-only viewers can
+        # subscribe. Bound lazily on the first broadcast step. Viewer-side is a
+        # plain SUB + msgpack -- no client library required.
+        self.broadcast_viewers = broadcast_viewers
+        self.viewer_port = viewer_port
+        self._viewer_bcast_bound = False
         self.mujoco_version_check = mujoco_version_check
         self.local_model = local_model
         if puppet_drift_check not in ("error", "warn", "off"):
@@ -1253,6 +1262,22 @@ class URLabClient:
         }
         if include_cameras:
             request["include_cameras"] = include_cameras
+
+        # Owner broadcast: fan the just-pushed kinematics out to any viewers,
+        # synced to this step (the client is the authority in puppet mode). The
+        # render-server RPC below is unchanged; viewers are a parallel PUB.
+        if self.broadcast_viewers:
+            if not self._viewer_bcast_bound:
+                self._transport.enable_viewer_broadcast(self.viewer_port)
+                self._viewer_bcast_bound = True
+            self._transport.publish_viewer_state(
+                {
+                    "t": request["time"],
+                    "qpos": request["qpos"],
+                    "qvel": request["qvel"],
+                }
+            )
+
         reply = self._rpc("step", request, expected_op="step_ok")
         self._absorb_step_reply(reply)
         return reply

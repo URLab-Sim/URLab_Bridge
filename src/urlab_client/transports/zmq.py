@@ -79,6 +79,11 @@ class ZmqTransport(Transport):
         self._cam_threads: Dict[Tuple[str, str], threading.Thread] = {}
         self._cam_stops: Dict[Tuple[str, str], threading.Event] = {}
 
+        # Viewer bus: a PUB the owner binds so read-only viewers can subscribe
+        # to raw kinematics. Lazily bound by enable_viewer_broadcast().
+        self._viewer_pub: Any = None
+        self._viewer_endpoint: Optional[str] = None
+
     # -- RPC --------------------------------------------------------------
 
     def _ensure_socket(self) -> None:
@@ -353,6 +358,48 @@ class ZmqTransport(Transport):
             backoff = min(backoff * 2.0, _STREAM_RECONNECT_MAX_S)
         logger.debug("ZmqTransport camera %s/%s stream loop exited", key[0], key[1])
 
+    # -- viewer bus (owner -> viewers) ------------------------------------
+
+    # Topic every viewer subscribes to. A bare prefix keeps the wire format
+    # trivial: [topic, msgpack({"t","qpos","qvel"})].
+    _VIEWER_TOPIC = b"viewer"
+
+    def enable_viewer_broadcast(self, port: int) -> Optional[str]:
+        if zmq is None:
+            raise RuntimeError("pyzmq not installed; cannot broadcast")
+        if msgpack is None:
+            raise RuntimeError("msgpack not installed; cannot broadcast")
+        with self._sock_lock:
+            if self._viewer_pub is not None:
+                return self._viewer_endpoint
+            if self._ctx is None:
+                self._ctx = zmq.Context()
+            pub = self._ctx.socket(zmq.PUB)
+            pub.setsockopt(zmq.LINGER, 0)
+            # Bind on every interface so a viewer on another host can reach it;
+            # the owner advertises its own reachable address out of band.
+            endpoint = f"tcp://0.0.0.0:{port}"
+            pub.bind(endpoint)
+            self._viewer_pub = pub
+            self._viewer_endpoint = endpoint
+            logger.info("ZmqTransport viewer PUB bound to %s", endpoint)
+            return endpoint
+
+    def publish_viewer_state(self, payload: Mapping[str, Any]) -> None:
+        # Called once per owner step; drop silently if not enabled so callers
+        # need no guard. PUB.send never blocks (it discards with no subscriber).
+        with self._sock_lock:
+            pub = self._viewer_pub
+            if pub is None:
+                return
+            try:
+                pub.send_multipart(
+                    [self._VIEWER_TOPIC, msgpack.packb(dict(payload), use_bin_type=True)],
+                    flags=zmq.NOBLOCK,
+                )
+            except Exception as exc:  # pragma: no cover - best-effort broadcast
+                logger.debug("viewer publish dropped: %s", exc)
+
     # -- lifecycle --------------------------------------------------------
 
     def close(self) -> None:
@@ -368,6 +415,12 @@ class ZmqTransport(Transport):
                 except Exception:
                     pass
             self._socket = None
+            if self._viewer_pub is not None:
+                try:
+                    self._viewer_pub.close(linger=0)
+                except Exception:
+                    pass
+                self._viewer_pub = None
             if self._ctx is not None:
                 try:
                     # destroy(linger=0) is idempotent and revokes any pending
