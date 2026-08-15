@@ -147,13 +147,13 @@ def main() -> None:
             for _ in range(n_sub):
                 mujoco.mj_step(model, data)
 
-            # Per-geom world transforms: position + quat (from the 3x3 xmat).
-            xpos = np.asarray(data.geom_xpos, dtype=np.float64).reshape(-1)
-            gx = np.asarray(data.geom_xmat, dtype=np.float64).reshape(model.ngeom, 9)
-            xquat = np.empty(model.ngeom * 4, dtype=np.float64)
-            for g in range(model.ngeom):
-                mujoco.mju_mat2Quat(quat, gx[g])
-                xquat[4 * g : 4 * g + 4] = quat
+            # Per-BODY world transforms (nbody << ngeom): the renderer composes each
+            # geom's world pose from its body transform and its body-relative offset
+            # (which it already has from the model). data.xquat is already wxyz, so no
+            # per-element quat conversion is needed either. Mocap bodies are covered
+            # for free (their xpos/xquat carry the mocap pose).
+            bxpos = np.asarray(data.xpos, dtype=np.float64).reshape(-1)
+            bxquat = np.asarray(data.xquat, dtype=np.float64).reshape(-1)
 
             # Per-camera world transforms, so a render-server renderer's cameras
             # track moving bodies.
@@ -166,7 +166,7 @@ def main() -> None:
                     mujoco.mju_mat2Quat(quat, cx[c])
                     cxquat[4 * c : 4 * c + 4] = quat
 
-            owner.publish_geoms(frame, xpos, xquat, cxpos, cxquat)
+            owner.publish_bodies(frame, bxpos, bxquat, cxpos, cxquat)
             if viewer is not None:
                 viewer.sync()  # native MuJoCo viewer = ground truth, side by side
             frame += 1

@@ -211,6 +211,28 @@ class FastPathOwner:
         return perts
 
     # -- transform bus ------------------------------------------------------ #
+    def publish_bodies(self, frame: int, bxpos, bxquat, cxpos=None, cxquat=None) -> None:
+        """Publish one per-BODY transform frame on the ``geoms`` topic.
+
+        bxpos is a flat length-3*nbody sequence, bxquat length-4*nbody (wxyz) --
+        i.e. ``data.xpos`` / ``data.xquat``. The renderer composes each geom's world
+        pose from its body transform and its body-relative offset (from the model),
+        so the wire carries nbody transforms instead of ngeom, and mocap bodies are
+        covered for free. cxpos/cxquat, when given, are the per-camera world
+        transforms (3*ncam, 4*ncam wxyz).
+        """
+        payload = {"f": int(frame), "bxpos": list(bxpos), "bxquat": list(bxquat)}
+        if cxpos is not None and cxquat is not None:
+            payload["cxpos"] = list(cxpos)
+            payload["cxquat"] = list(cxquat)
+        try:
+            self._pub.send_multipart(
+                [b"geoms", msgpack.packb(payload, use_bin_type=True)],
+                flags=zmq.NOBLOCK,
+            )
+        except zmq.ZMQError:
+            pass  # best-effort; a slow/absent renderer never stalls the sim
+
     def publish_geoms(self, frame: int, xpos, xquat, cxpos=None, cxquat=None) -> None:
         """Publish one per-geom transform frame on the ``geoms`` topic.
 
