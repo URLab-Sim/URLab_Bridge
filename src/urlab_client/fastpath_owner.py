@@ -119,6 +119,16 @@ class FastPathOwner:
         self._perturb: dict[int, list[float]] = {}
         self._write_registry()
 
+    # -- model swap --------------------------------------------------------- #
+    def update_model(self, mjb_bytes: bytes, ngeom: Optional[int] = None) -> None:
+        """Swap the MJB served on ``fastpath_hello`` after a live scene change, so a
+        renderer that discovers this owner LATER pulls the CURRENT scene, not the one
+        it started on (otherwise its geometry would mismatch the transform stream)."""
+        self._mjb = bytes(mjb_bytes)
+        if ngeom is not None:
+            self._ngeom = int(ngeom)
+        self._write_registry()  # refresh advertised ngeom
+
     # -- properties --------------------------------------------------------- #
     @property
     def bus_endpoint(self) -> str:
@@ -223,12 +233,22 @@ class FastPathOwner:
         return perts
 
     # -- transform bus ------------------------------------------------------ #
-    def _send_transforms(self, payload: dict, cxpos, cxquat) -> None:
+    def _send_transforms(self, payload: dict, cxpos, cxquat, usercam=None) -> None:
         """Attach optional per-camera transforms and publish one frame on the
-        ``geoms`` topic. Best-effort: a slow/absent renderer never stalls the sim."""
+        ``geoms`` topic. Best-effort: a slow/absent renderer never stalls the sim.
+
+        ``usercam``, when given, is a ``(pos, fwd, up)`` triple of MuJoCo-world
+        3-vectors for the operator's free/user camera; a render slave in "copycat"
+        mode points its viewport at it.
+        """
         if cxpos is not None and cxquat is not None:
             payload["cxpos"] = list(cxpos)
             payload["cxquat"] = list(cxquat)
+        if usercam is not None:
+            pos, fwd, up = usercam
+            payload["ucpos"] = [float(v) for v in pos]
+            payload["ucfwd"] = [float(v) for v in fwd]
+            payload["ucup"] = [float(v) for v in up]
         try:
             self._pub.send_multipart(
                 [b"geoms", msgpack.packb(payload, use_bin_type=True)],
@@ -237,7 +257,8 @@ class FastPathOwner:
         except zmq.ZMQError:
             pass
 
-    def publish_bodies(self, frame: int, bxpos, bxquat, cxpos=None, cxquat=None) -> None:
+    def publish_bodies(self, frame: int, bxpos, bxquat, cxpos=None, cxquat=None,
+                       usercam=None) -> None:
         """Publish one per-BODY transform frame on the ``geoms`` topic.
 
         bxpos is a flat length-3*nbody sequence, bxquat length-4*nbody (wxyz) --
@@ -245,10 +266,12 @@ class FastPathOwner:
         pose from its body transform and its body-relative offset (from the model),
         so the wire carries nbody transforms instead of ngeom, and mocap bodies are
         covered for free. cxpos/cxquat, when given, are the per-camera world
-        transforms (3*ncam, 4*ncam wxyz).
+        transforms (3*ncam, 4*ncam wxyz). usercam, when given, is the operator's
+        free-camera (pos, fwd, up) for a copycat render slave.
         """
         self._send_transforms(
-            {"f": int(frame), "bxpos": list(bxpos), "bxquat": list(bxquat)}, cxpos, cxquat
+            {"f": int(frame), "bxpos": list(bxpos), "bxquat": list(bxquat)},
+            cxpos, cxquat, usercam,
         )
 
     def publish_geoms(self, frame: int, xpos, xquat, cxpos=None, cxquat=None) -> None:
