@@ -706,7 +706,13 @@ class URLabArticulation(URLabEntity):
             "bodies":    {v: k for k, v in (original_names_payload.get("bodies")    or {}).items()},
         }
 
-        self._walk_model(actuator_types_map)
+        # A fast-path "shadow" articulation is a raw mjModel with no loadable
+        # client model and no per-articulation name prefix, so the handshake ships
+        # its element metadata inline. Build from that instead of walking a model.
+        if handshake.get("raw_model"):
+            self._build_from_raw_handshake(handshake, actuator_types_map)
+        else:
+            self._walk_model(actuator_types_map)
 
         # Free-base detection. A floating-base joint is `mjtJoint.mjJNT_FREE`
         # (jnt_type==0) with qpos_dim==7 / qvel_dim==6. Cached after
@@ -787,6 +793,66 @@ class URLabArticulation(URLabEntity):
             )
 
     # -- helpers ----------------------------------------------------------
+
+    def _build_from_raw_handshake(
+        self, handshake: Mapping[str, Any], actuator_types_map: Mapping[str, Any]
+    ) -> None:
+        """Populate actuators + joints from inline handshake metadata.
+
+        A fast-path shadow articulation is a raw mjModel with no loadable client
+        model and no per-articulation name prefix, so its element names / ids /
+        ranges ride the handshake (`raw_actuators` / `raw_joints`). Per-step state
+        arrives in the reply's `arts` block keyed by name, so no local MjModel /
+        MjData is needed.
+        """
+        local_qpos = 0
+        local_qvel = 0
+        for ji, j in enumerate(handshake.get("raw_joints", []) or []):
+            name = str(j.get("name"))
+            jt = int(j.get("type", 3))  # mjJNT_HINGE when unspecified
+            qd = _qpos_dim_for_jnt(jt)
+            vd = _qvel_dim_for_jnt(jt)
+            rng = tuple(float(x) for x in j["range"]) if j.get("range") else None
+            self.joints[name] = Joint(
+                name=name,
+                id=int(j.get("id", ji)),
+                jnt_type=jt,
+                qpos_offset=int(j.get("qpos_adr", -1)),
+                qpos_dim=qd,
+                qvel_offset=int(j.get("qvel_adr", -1)),
+                qvel_dim=vd,
+                qpos_local_offset=local_qpos,
+                qvel_local_offset=local_qvel,
+                range=rng,
+            )
+            self._joint_local[name] = ji
+            local_qpos += qd
+            local_qvel += vd
+
+        for ai, a in enumerate(handshake.get("raw_actuators", []) or []):
+            name = str(a.get("name"))
+            type_str = actuator_types_map.get(name)
+            atype: Optional[ActuatorType] = None
+            if type_str:
+                try:
+                    atype = coerce(ActuatorType, type_str)
+                except ValueError:
+                    atype = None
+            ctrlrange = (
+                tuple(float(x) for x in a["ctrlrange"]) if a.get("ctrlrange") else None
+            )
+            gear = np.array([float(a.get("gear", 1.0))], dtype=np.float64)
+            self.actuators[name] = Actuator(
+                name=name,
+                id=int(a.get("id", ai)),
+                type=atype,
+                joint=a.get("joint"),
+                ctrlrange=ctrlrange,
+                gear=gear,
+                _art=self,
+                _local_index=ai,
+            )
+            self._actuator_local[name] = ai
 
     def _prefix_match(self, name: Optional[str]) -> bool:
         if not name:
