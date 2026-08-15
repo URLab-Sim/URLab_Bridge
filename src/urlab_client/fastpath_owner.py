@@ -38,6 +38,15 @@ from .pool import default_registry_dir
 FASTPATH_OWNER_CAP = "fastpath_owner"
 
 
+def _vec3(v) -> list[float]:
+    """Coerce an arbitrary wire value into exactly three floats, padding a short
+    sequence with zeros and truncating a long one. Guarantees indexing [0..2] is
+    always safe, so a malformed force/torque can't raise mid-handler."""
+    out = [float(x) for x in v][:3]
+    out += [0.0] * (3 - len(out))
+    return out
+
+
 class FastPathOwner:
     """Advertise + serve a MuJoCo model to UE fast-path renderers.
 
@@ -186,11 +195,14 @@ class FastPathOwner:
             return msgpack.packb(reply, use_bin_type=True)
         if op == "fastpath_perturb":
             # A renderer pushes an external force/torque on a body. Accumulate it;
-            # the owner applies it to xfrc_applied on its next step.
+            # the owner applies it to xfrc_applied on its next step. Force/torque
+            # are normalized to length 3 (padding short vectors) BEFORE indexing, so
+            # a truncated wire vector can't raise mid-handler and wedge the REP
+            # socket in a received-but-never-replied state.
             try:
                 body = int(req.get("body", -1))
-                force = [float(x) for x in req.get("force", [0, 0, 0])][:3]
-                torque = [float(x) for x in req.get("torque", [0, 0, 0])][:3]
+                force = _vec3(req.get("force", (0, 0, 0)))
+                torque = _vec3(req.get("torque", (0, 0, 0)))
                 if body >= 0:
                     acc = self._perturb.setdefault(body, [0.0] * 6)
                     for i in range(3):
@@ -203,7 +215,7 @@ class FastPathOwner:
             {"error": f"unknown op {op!r}"}, use_bin_type=True
         )
 
-    def drain_perturbations(self) -> dict:
+    def drain_perturbations(self) -> "dict[int, list[float]]":
         """Return the accumulated {body_id: 6-vector} perturbations and clear
         them. Apply the result to ``data.xfrc_applied`` before the next step."""
         perts = self._perturb
@@ -211,6 +223,20 @@ class FastPathOwner:
         return perts
 
     # -- transform bus ------------------------------------------------------ #
+    def _send_transforms(self, payload: dict, cxpos, cxquat) -> None:
+        """Attach optional per-camera transforms and publish one frame on the
+        ``geoms`` topic. Best-effort: a slow/absent renderer never stalls the sim."""
+        if cxpos is not None and cxquat is not None:
+            payload["cxpos"] = list(cxpos)
+            payload["cxquat"] = list(cxquat)
+        try:
+            self._pub.send_multipart(
+                [b"geoms", msgpack.packb(payload, use_bin_type=True)],
+                flags=zmq.NOBLOCK,
+            )
+        except zmq.ZMQError:
+            pass
+
     def publish_bodies(self, frame: int, bxpos, bxquat, cxpos=None, cxquat=None) -> None:
         """Publish one per-BODY transform frame on the ``geoms`` topic.
 
@@ -221,17 +247,9 @@ class FastPathOwner:
         covered for free. cxpos/cxquat, when given, are the per-camera world
         transforms (3*ncam, 4*ncam wxyz).
         """
-        payload = {"f": int(frame), "bxpos": list(bxpos), "bxquat": list(bxquat)}
-        if cxpos is not None and cxquat is not None:
-            payload["cxpos"] = list(cxpos)
-            payload["cxquat"] = list(cxquat)
-        try:
-            self._pub.send_multipart(
-                [b"geoms", msgpack.packb(payload, use_bin_type=True)],
-                flags=zmq.NOBLOCK,
-            )
-        except zmq.ZMQError:
-            pass  # best-effort; a slow/absent renderer never stalls the sim
+        self._send_transforms(
+            {"f": int(frame), "bxpos": list(bxpos), "bxquat": list(bxquat)}, cxpos, cxquat
+        )
 
     def publish_geoms(self, frame: int, xpos, xquat, cxpos=None, cxquat=None) -> None:
         """Publish one per-geom transform frame on the ``geoms`` topic.
@@ -240,17 +258,9 @@ class FastPathOwner:
         cxpos/cxquat, when given, are the per-camera world transforms (3*ncam and
         4*ncam wxyz) so streamed cameras track moving bodies.
         """
-        payload = {"f": int(frame), "xpos": list(xpos), "xquat": list(xquat)}
-        if cxpos is not None and cxquat is not None:
-            payload["cxpos"] = list(cxpos)
-            payload["cxquat"] = list(cxquat)
-        try:
-            self._pub.send_multipart(
-                [b"geoms", msgpack.packb(payload, use_bin_type=True)],
-                flags=zmq.NOBLOCK,
-            )
-        except zmq.ZMQError:
-            pass  # best-effort; a slow/absent renderer never stalls the sim
+        self._send_transforms(
+            {"f": int(frame), "xpos": list(xpos), "xquat": list(xquat)}, cxpos, cxquat
+        )
 
     # -- lifecycle ---------------------------------------------------------- #
     def close(self) -> None:

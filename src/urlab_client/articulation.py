@@ -803,16 +803,26 @@ class URLabArticulation(URLabEntity):
         model and no per-articulation name prefix, so its element names / ids /
         ranges ride the handshake (`raw_actuators` / `raw_joints`). Per-step state
         arrives in the reply's `arts` block keyed by name, so no local MjModel /
-        MjData is needed.
+        MjData is needed. The wire data is untrusted, so malformed elements are
+        skipped with a warning rather than crashing construction or fabricating
+        entries.
         """
         local_qpos = 0
         local_qvel = 0
-        for ji, j in enumerate(handshake.get("raw_joints", []) or []):
-            name = str(j.get("name"))
-            jt = int(j.get("type", 3))  # mjJNT_HINGE when unspecified
+        for ji, j in enumerate(handshake.get("raw_joints") or []):
+            if not isinstance(j, Mapping):
+                logger.warning("raw_joints[%d] is not a mapping; skipping", ji)
+                continue
+            name = j.get("name")
+            if not name:
+                logger.warning("raw_joints[%d] has no name; skipping", ji)
+                continue
+            name = str(name)
+            if "type" not in j:
+                logger.warning("raw joint %r has no type; assuming hinge", name)
+            jt = int(j.get("type", _MJ_JNT_HINGE))
             qd = _qpos_dim_for_jnt(jt)
             vd = _qvel_dim_for_jnt(jt)
-            rng = tuple(float(x) for x in j["range"]) if j.get("range") else None
             self.joints[name] = Joint(
                 name=name,
                 id=int(j.get("id", ji)),
@@ -823,31 +833,35 @@ class URLabArticulation(URLabEntity):
                 qvel_dim=vd,
                 qpos_local_offset=local_qpos,
                 qvel_local_offset=local_qvel,
-                range=rng,
+                range=_range_pair(j.get("range"), f"raw joint {name!r}"),
+                body_id=int(j.get("body_id", -1)),
             )
             self._joint_local[name] = ji
             local_qpos += qd
             local_qvel += vd
 
-        for ai, a in enumerate(handshake.get("raw_actuators", []) or []):
-            name = str(a.get("name"))
-            type_str = actuator_types_map.get(name)
-            atype: Optional[ActuatorType] = None
-            if type_str:
-                try:
-                    atype = coerce(ActuatorType, type_str)
-                except ValueError:
-                    atype = None
-            ctrlrange = (
-                tuple(float(x) for x in a["ctrlrange"]) if a.get("ctrlrange") else None
-            )
-            gear = np.array([float(a.get("gear", 1.0))], dtype=np.float64)
+        for ai, a in enumerate(handshake.get("raw_actuators") or []):
+            if not isinstance(a, Mapping):
+                logger.warning("raw_actuators[%d] is not a mapping; skipping", ai)
+                continue
+            name = a.get("name")
+            if not name:
+                logger.warning("raw_actuators[%d] has no name; skipping", ai)
+                continue
+            name = str(name)
+            gear_raw = a.get("gear")
+            if isinstance(gear_raw, (list, tuple)):
+                gear = np.array([float(x) for x in gear_raw], dtype=np.float64)
+            elif gear_raw is not None:
+                gear = np.array([float(gear_raw)], dtype=np.float64)
+            else:
+                gear = None
             self.actuators[name] = Actuator(
                 name=name,
                 id=int(a.get("id", ai)),
-                type=atype,
+                type=_coerce_actuator_type(actuator_types_map.get(name)),
                 joint=a.get("joint"),
-                ctrlrange=ctrlrange,
+                ctrlrange=_range_pair(a.get("ctrlrange"), f"raw actuator {name!r}"),
                 gear=gear,
                 _art=self,
                 _local_index=ai,
@@ -899,16 +913,9 @@ class URLabArticulation(URLabEntity):
             # Actuator type from handshake (authored). Handshake key can be
             # the short (unprefixed) or full name — try short first.
             short = _strip_prefix(name, self.model_prefix)
-            type_str = (
-                actuator_types_map.get(short)
-                or actuator_types_map.get(name)
+            actuator_type = _coerce_actuator_type(
+                actuator_types_map.get(short) or actuator_types_map.get(name)
             )
-            actuator_type: Optional[ActuatorType] = None
-            if type_str:
-                try:
-                    actuator_type = coerce(ActuatorType, type_str)
-                except ValueError:
-                    actuator_type = None
 
             act = Actuator(
                 name=short,
@@ -1279,25 +1286,33 @@ class URLabArticulation(URLabEntity):
             ctrl = np.asarray(block["ctrl"], dtype=np.float64)
             if ctrl.size == self.ctrl_array.size:
                 self.last_applied_ctrl = ctrl
+        # The reply's qpos/qvel are per-articulation in joint discovery order, the
+        # same order qpos_array/qvel_array are packed, so a straight prefix copy is
+        # the identity mapping. Guard the size like the ctrl/act blocks do: a dim
+        # mismatch (e.g. a joint type the handshake and UE disagree on) must not
+        # silently mis-fill or raise mid-step.
         qpos_all = block.get("qpos")
         if qpos_all is not None:
             qpos_all = np.asarray(qpos_all, dtype=np.float64)
-            # Build a slice from local order
-            off = 0
-            for name, j in self.joints.items():
-                n = j.qpos_dim
-                # The reply's qpos is per-articulation, sorted by
-                # discovery order; UE builds the reply the same way.
-                self.qpos_array[off : off + n] = qpos_all[off : off + n]
-                off += n
+            n = self.qpos_array.size
+            if qpos_all.size >= n:
+                self.qpos_array[:] = qpos_all[:n]
+            else:
+                logger.warning(
+                    "%s: reply qpos has %d values, expected >= %d; skipping",
+                    self.prefix, qpos_all.size, n,
+                )
         qvel_all = block.get("qvel")
         if qvel_all is not None:
             qvel_all = np.asarray(qvel_all, dtype=np.float64)
-            off = 0
-            for name, j in self.joints.items():
-                n = j.qvel_dim
-                self.qvel_array[off : off + n] = qvel_all[off : off + n]
-                off += n
+            n = self.qvel_array.size
+            if qvel_all.size >= n:
+                self.qvel_array[:] = qvel_all[:n]
+            else:
+                logger.warning(
+                    "%s: reply qvel has %d values, expected >= %d; skipping",
+                    self.prefix, qvel_all.size, n,
+                )
         sensors_block = block.get("sensors") or {}
         for sname, raw in sensors_block.items():
             if sname in self.sensors:
@@ -1375,6 +1390,36 @@ def _qpos_dim_for_jnt(jtype: int) -> int:
 def _qvel_dim_for_jnt(jtype: int) -> int:
     # free=6, ball=3, slide/hinge=1
     return {0: 6, 1: 3, 2: 1, 3: 1}.get(jtype, 1)
+
+
+_MJ_JNT_HINGE = 3  # mjtJoint.mjJNT_HINGE
+
+
+def _coerce_actuator_type(type_str: Optional[str]) -> Optional["ActuatorType"]:
+    """Handshake actuator-kind string -> ActuatorType, or None if absent/unknown.
+    Shared by the compiled-model walk and the raw fast-path builder."""
+    if not type_str:
+        return None
+    try:
+        return coerce(ActuatorType, type_str)
+    except ValueError:
+        return None
+
+
+def _range_pair(raw: Any, ctx: str) -> Optional[Tuple[float, float]]:
+    """Validate a [lo, hi] wire pair into a float tuple, or None (warning on
+    malformed input). For joint / actuator ranges out of untrusted handshake data."""
+    if raw is None:
+        return None
+    try:
+        vals = [float(x) for x in raw]
+    except (TypeError, ValueError):
+        logger.warning("%s has a malformed range %r; ignoring", ctx, raw)
+        return None
+    if len(vals) != 2:
+        logger.warning("%s range %r is not length-2; ignoring", ctx, raw)
+        return None
+    return (vals[0], vals[1])
 
 
 _TRN_TYPE_NAMES = {
