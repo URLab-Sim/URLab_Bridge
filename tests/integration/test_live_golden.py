@@ -58,13 +58,10 @@ def _only_articulation(client):
 def test_wire_smoke(golden_session):
     """One pass through every namespace on the live golden session."""
     from urlab_client import (
-        ActorBounds,
-        ActorHierarchyNode,
         CameraPose,
         ContactsResult,
         SceneSnapshot,
         URLabRPCError,
-        URLabSpawnHandle,
     )
 
     client = golden_session
@@ -74,46 +71,40 @@ def test_wire_smoke(golden_session):
     assert client.manager_present, "manager should be present after PIE start"
     assert client.articulations, "golden scene should expose an articulation"
 
+    # Entity redesign (approach B): at play the authoring AMjArticulation
+    # actor is retired — AAMjManager::BuildRuntimeView builds the render
+    # view, hands authored logic to the entity partition, then destroys
+    # every AMjArticulation (GetAllArticulations()==0 in the PIE world).
+    # A robot at play is therefore addressed by ENTITY NAME through
+    # client.articulations, not as a play-world UE actor. Assert the entity
+    # is reachable by name with its cameras / actuators / sensors, rather
+    # than asserting a play-time articulation ACTOR via
+    # find_actors(AMjArticulation) / actor-level bounds / hierarchy /
+    # duplicate: actor_hierarchy queries the PIE world where the actor no
+    # longer exists, and the remaining actor ops otherwise lean on the
+    # golden level's template blueprints.
     art = _only_articulation(client)
     assert len(art.actuators) == 2, f"expected 2 actuators, got {list(art.actuators.keys())}"
     assert len(art.sensors) == 2, f"expected 2 sensors, got {list(art.sensors.keys())}"
+    assert len(art.cameras) == 1, f"expected 1 camera, got {list(art.cameras.keys())}"
 
     # sim namespace
     status = client.sim.status()
     assert status.state.value == "ready"
 
-    # outliner namespace — list_blueprints + list_actors round-trip
+    # outliner namespace — list_blueprints + list_actors round-trip. Scene-
+    # wide shape checks that don't depend on the robot being a play-world
+    # actor (the manager and any non-articulation actors are still present).
     blueprints = client.outliner.list_blueprints()
     assert isinstance(blueprints, list)
     actors = client.outliner.list_actors()
     assert isinstance(actors, list)
-    assert actors, "outliner should report at least the imported actors"
+    assert actors, "outliner should report at least the manager"
 
-    # outliner namespace — find / bounds
-    arts = client.outliner.find_actors(class_filter="AMjArticulation")
-    assert any(a.actor_id == "golden_root" for a in arts), \
-        f"find_actors should report golden_root, got {[a.actor_id for a in arts]}"
-    bounds = client.outliner.get_actor_bounds("golden_root")
-    assert isinstance(bounds, ActorBounds)
-    assert bounds.actor_name, "get_actor_bounds should resolve a UE name"
-
-    # scene namespace — snapshot / hierarchy / duplicate
+    # scene namespace — snapshot round-trip (shape only).
     snap = client.scene.snapshot()
     assert isinstance(snap, SceneSnapshot)
-    assert snap.actors, "snapshot should list at least the manager + articulation"
-    tree = client.scene.actor_hierarchy("golden_root")
-    assert isinstance(tree, ActorHierarchyNode)
-    assert tree.name, "actor_hierarchy root should have a name"
-    dup = client.scene.duplicate_actor("golden_root", "golden_root_dup")
-    try:
-        assert isinstance(dup, URLabSpawnHandle)
-        assert dup.actor_id == "golden_root_dup"
-    finally:
-        # Always destroy the duplicate so subsequent tests see a clean scene.
-        try:
-            client.scene.remove_actor("golden_root_dup")
-        except URLabRPCError:
-            pass
+    assert snap.actors, "snapshot should list at least the manager"
 
     # runtime namespace — step + observation surface
     actuator_names = list(art.actuators.keys())

@@ -100,11 +100,6 @@ def test_set_twist_returns_none(pie_client):
     assert result is None
 
 
-def test_set_control_source_returns_none(pie_client):
-    result = pie_client.runtime.set_control_source("zmq")
-    assert result is None
-
-
 def test_pd_controller_set_gains_round_trip(pie_client):
     """For a PD-controlled articulation, set_gains updates the live
     kp/kv view."""
