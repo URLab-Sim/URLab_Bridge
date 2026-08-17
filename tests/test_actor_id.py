@@ -37,7 +37,7 @@ def handshake_no_ids(base_handshake):
 def handshake_with_ids(base_handshake):
     h = copy.deepcopy(base_handshake)
     # vx300s gets an actor id; go2 stays unset.
-    for art in h["articulations"]:
+    for art in h["entities"]:
         if art["prefix"] == "vx300s":
             art["actor_id"] = "robot_a"
     return h
@@ -89,7 +89,7 @@ def test_apply_handshake_resets_articulations_by_id(handshake_with_ids):
 
     # Reapply with no ids.
     no_ids = copy.deepcopy(handshake_with_ids)
-    for art in no_ids["articulations"]:
+    for art in no_ids["entities"]:
         art.pop("actor_id", None)
     c._apply_handshake(no_ids)
     assert c.articulations_by_id == {}

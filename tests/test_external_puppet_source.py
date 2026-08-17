@@ -73,8 +73,7 @@ def test_external_puppet_step_zero_pushes_without_advancing(
     handshake = {
         **base_handshake,
         "mjb": None,
-        "articulations": [],
-        "entities": {},
+        "entities": [],
     }
     mock_step_server.replies.extend([handshake, wr.step_ok()])
     client = URLabClient(

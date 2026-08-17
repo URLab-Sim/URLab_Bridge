@@ -780,42 +780,32 @@ class URLabClient:
             # whatever actually got built. Compare here or not at all.
             self._check_puppet_drift(mjb_bytes)
 
-        # Build articulations
+        # Build entities. The handshake ships ONE `entities` array; every
+        # element is a full entity carrying the rich per-robot keys (prefix,
+        # actuator_types, raw_*, controller, camera_topics, ...) plus the
+        # folded-in free-base fields (id / has_free_base / free_joint / ...).
+        # Robots and free-base bodies alike are elements here. `URLabArticulation`
+        # represents both: a free-base prop is just one with empty actuator /
+        # joint dicts. `articulations` is the typed robot view; `entities`
+        # mirrors the same objects keyed by prefix/name.
         self.articulations = {}
         self.articulations_by_id = {}
-        for art in reply.get("articulations", []):
-            prefix = art.get("prefix")
+        for elem in reply.get("entities", []):
+            prefix = elem.get("prefix")
             if not prefix:
                 continue
             wrapper = URLabArticulation(
                 prefix=prefix,
                 model=self.model,
                 data=self.data,
-                handshake=art,
+                handshake=elem,
                 client=self,
             )
             self.articulations[prefix] = wrapper
             if wrapper.actor_id:
                 self.articulations_by_id[wrapper.actor_id] = wrapper
 
-        # Non-articulation entities -- ship in handshake under `entities`,
-        # optional. Modeled as plain `URLabEntity` instances; articulations
-        # are the same type with extras (joints / actuators / etc.) and
-        # ride in the `articulations` block.
-        self.entities = {}
-        self.entities.update(self.articulations)
-        for name, payload in (reply.get("entities") or {}).items():
-            entity = URLabEntity(
-                name=name,
-                body_id=int(payload.get("id", -1)),
-                has_free_base=bool(payload.get("has_free_base", False)),
-                client=self,
-            )
-            entity.free_joint = payload.get("free_joint")
-            entity.free_joint_id = payload.get("free_joint_id")
-            entity.qpos_offset = payload.get("qpos_offset")
-            entity.qvel_offset = payload.get("qvel_offset")
-            self.entities[name] = entity
+        self.entities = dict(self.articulations)
 
         # Global cameras. Rebuilt from scratch each handshake (like the
         # articulation set above); accumulating across refresh() would leak
@@ -2107,8 +2097,6 @@ class URLabClient:
             self._absorb_step_reply_locked(reply)
 
     def _absorb_step_reply_locked(self, reply: Mapping[str, Any]) -> None:
-        _Art = URLabArticulation
-
         if "time" in reply:
             self.sim_time = float(reply["time"])
         if "step" in reply:
@@ -2217,7 +2205,13 @@ class URLabClient:
         entity_block = reply.get("scene") or {}
         for name, block in entity_block.items():
             entity = self.entities.get(name)
-            if entity is None or self.data is None or isinstance(entity, _Art):
+            if entity is None or self.data is None:
+                continue
+            # An entity whose pose is driven by joints (a real articulation)
+            # gets its xpos from the qpos mirror + mj_forward above; the scene
+            # block is authoritative only for jointless bodies (bare free-base
+            # props, which ride as articulations with empty joint dicts).
+            if getattr(entity, "joints", None):
                 continue
             if entity.body_id < 0:
                 continue

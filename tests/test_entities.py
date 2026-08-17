@@ -32,9 +32,9 @@ def test_entity_from_handshake():
         "urlab_version": "u",
         "mujoco_version": "3.7.0",
         "mjb": b"",
-        "articulations": [],
-        "entities": {
-            "pallet": {
+        "entities": [
+            {
+                "prefix": "pallet",
                 "id": 5,
                 "has_free_base": True,
                 "free_joint": "pallet_free",
@@ -42,7 +42,7 @@ def test_entity_from_handshake():
                 "qpos_offset": 14,
                 "qvel_offset": 12,
             }
-        },
+        ],
     }
     client.mujoco_version_check = False
     client.local_model = False
@@ -86,8 +86,7 @@ def test_articulations_appear_in_entities():
             "session_id": "s",
             "urlab_version": "u",
             "mujoco_version": mujoco.__version__,
-            "articulations": [{"prefix": "vx300s", "default_control_mode": "raw"}],
-            "entities": {},
+            "entities": [{"prefix": "vx300s", "default_control_mode": "raw"}],
         }
     )
     assert "vx300s" in client.entities
@@ -122,8 +121,7 @@ def test_entity_root_pose_absorbs_from_step_reply():
             "session_id": "s",
             "urlab_version": "u",
             "mujoco_version": mujoco.__version__,
-            "articulations": [],
-            "entities": {"pallet": {"id": pallet_id, "has_free_base": False}},
+            "entities": [{"prefix": "pallet", "id": pallet_id, "has_free_base": False}],
         }
     )
     client._absorb_step_reply(
@@ -143,19 +141,7 @@ def test_entity_root_pose_absorbs_from_step_reply():
 
 def test_entity_apply_xfrc_in_puppet_warns():
     client = URLabClient(step_mode="puppet")
-    client.mujoco_version_check = False
-    client.local_model = False
-    client._apply_handshake(
-        {
-            "op": "hello_ok",
-            "session_id": "s",
-            "urlab_version": "u",
-            "mujoco_version": "3.7.0",
-            "articulations": [],
-            "entities": {"pallet": {"id": 5, "has_free_base": False}},
-        }
-    )
-    entity = client.entities["pallet"]
+    entity = URLabEntity(name="pallet", body_id=5, has_free_base=False, client=client)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         entity.apply_xfrc(force=[1, 0, 0])

@@ -105,7 +105,7 @@ def base_handshake(mujoco_mod, synthetic_mjb) -> Dict[str, Any]:
         "urlab_version": "urlab/test",
         "mujoco_version": mujoco_mod.__version__,
         "mjb": synthetic_mjb,
-        "articulations": [
+        "entities": [
             {
                 "prefix": "vx300s",
                 "default_control_mode": "ue_controller",
@@ -157,7 +157,6 @@ def base_handshake(mujoco_mod, synthetic_mjb) -> Dict[str, Any]:
             },
         ],
         "global_cameras": {},
-        "entities": {},
     }
 
 

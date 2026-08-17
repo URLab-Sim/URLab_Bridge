@@ -65,7 +65,7 @@ def test_editor_time_hello_succeeds_with_no_manager(mock_step_server, mujoco_mod
             "urlab_version": "urlab/test",
             "mujoco_version": mujoco_mod.__version__,
             "manager_present": False,
-            "articulations": [],
+            "entities": [],
         })
         client.connect()
     finally:
@@ -361,7 +361,7 @@ def test_begin_pie_ready_absorbs_embedded_handshake(
         assert "robot_a" not in client.articulations_by_id
 
         post_pie = copy.deepcopy(base_handshake)
-        for art in post_pie["articulations"]:
+        for art in post_pie["entities"]:
             if art["prefix"] == "vx300s":
                 art["actor_id"] = "robot_a"
 
@@ -874,7 +874,7 @@ def test_editor_runtime_lookup(base_handshake):
     from urlab_client import URLabClient, URLabSpawnHandle
 
     h = copy.deepcopy(base_handshake)
-    for art in h["articulations"]:
+    for art in h["entities"]:
         if art["prefix"] == "vx300s":
             art["actor_id"] = "robot_a"
 

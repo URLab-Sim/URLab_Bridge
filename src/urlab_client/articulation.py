@@ -734,20 +734,31 @@ class URLabArticulation(URLabEntity):
         elif self.bodies:
             # Fixed-base: take the first walked body (lowest jid).
             root_body_id = next(iter(self.bodies.values())).id
+        elif "id" in handshake:
+            # Bare free-base body (no model walk): the root body id rides the
+            # handshake element directly.
+            root_body_id = int(handshake.get("id", -1))
 
         # Lift entity-level state. body_id + has_free_base feed root_pos_w
         # / root_quat_w and apply_xfrc; the rest of the entity surface is
-        # served by overrides on the articulation.
+        # served by overrides on the articulation. Prefer the walked free
+        # joint (it owns the local qpos/qvel buffers the root-pose overrides
+        # read); when the walk found none, fall back to the folded-in
+        # handshake fields, which is how a bare free-base body carries its
+        # offsets without a model to walk.
         self.body_id = int(root_body_id)
-        self.has_free_base = self._free_base_joint is not None
-        self.free_joint = self._free_base_joint.name if self._free_base_joint else None
-        self.free_joint_id = self._free_base_joint.id if self._free_base_joint else None
-        self.qpos_offset = (
-            self._free_base_joint.qpos_offset if self._free_base_joint else None
-        )
-        self.qvel_offset = (
-            self._free_base_joint.qvel_offset if self._free_base_joint else None
-        )
+        if self._free_base_joint is not None:
+            self.has_free_base = True
+            self.free_joint = self._free_base_joint.name
+            self.free_joint_id = self._free_base_joint.id
+            self.qpos_offset = self._free_base_joint.qpos_offset
+            self.qvel_offset = self._free_base_joint.qvel_offset
+        else:
+            self.has_free_base = bool(handshake.get("has_free_base", False))
+            self.free_joint = handshake.get("free_joint")
+            self.free_joint_id = handshake.get("free_joint_id")
+            self.qpos_offset = handshake.get("qpos_offset")
+            self.qvel_offset = handshake.get("qvel_offset")
         self._pending_xfrc: Optional[np.ndarray] = None
 
         # Flat-array fast paths. Indexed in the articulation's local order
