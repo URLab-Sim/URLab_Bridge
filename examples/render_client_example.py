@@ -31,7 +31,7 @@ def main() -> None:
     ap.add_argument("--xml", required=True, help="MuJoCo scene the server also loaded")
     ap.add_argument("--address", default="tcp://127.0.0.1")
     ap.add_argument("--step-port", type=int, default=5559)
-    ap.add_argument("--transport", default="zmq", choices=["zmq", "shm"])
+    ap.add_argument("--transport", default="zmq", choices=["zmq", "shm", "grpc"])
     ap.add_argument("--camera", default="0", help="camera index or name (default: first)")
     ap.add_argument("--frames", type=int, default=100)
     ap.add_argument("--delay", type=int, default=0,

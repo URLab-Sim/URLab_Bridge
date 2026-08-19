@@ -226,6 +226,16 @@ def make_transport(
             state_port=state_port,
             recv_timeout_ms=recv_timeout_ms,
         )
+    if name == "grpc":
+        # dm_env_rpc backend: `step_port` is the gRPC listen port (UE ListenPort,
+        # default 50051), not the ZMQ step port. Callers targeting the render
+        # server over gRPC pass the gRPC port explicitly.
+        from .grpc import GrpcTransport
+        return GrpcTransport(
+            address,
+            step_port=step_port,
+            recv_timeout_ms=recv_timeout_ms,
+        )
     if name == "shm":
         from .zmq import ZmqTransport
         from .shm import ShmTransport
@@ -249,7 +259,7 @@ def make_transport(
             rpc_rep_event=rpc_rep_event,
         )
     raise ValueError(
-        f"unknown transport name {name!r}; expected one of 'zmq', 'shm'"
+        f"unknown transport name {name!r}; expected one of 'zmq', 'shm', 'grpc'"
     )
 
 

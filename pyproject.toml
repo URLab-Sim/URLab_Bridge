@@ -27,6 +27,14 @@ ui = [
     "dearpygui>=1.11.1",
     "opencv-python>=4.8.0",
 ]
+# dm_env_rpc (gRPC) transport for the render server. Kept optional so a
+# ZMQ-only client drags in neither grpcio nor protobuf. googleapis-common-protos
+# supplies google.rpc.status_pb2, which the vendored dm_env_rpc stubs import.
+grpc = [
+    "grpcio>=1.62.0",
+    "protobuf>=4.25.0",
+    "googleapis-common-protos>=1.60.0",
+]
 # Base policy stack: the native / WalkTheseWays runners need torch, and the
 # gym env adapter needs gymnasium. Kept out of the core deps so a client that
 # only drives UE over RPC installs neither. robojudo / mjlab build on this.
