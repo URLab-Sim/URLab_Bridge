@@ -38,6 +38,7 @@ The server is launched separately (packaged exe or editor); see docs/render_serv
 """
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence
 
@@ -132,16 +133,106 @@ class RenderClient:
         self._frame = 0
 
     # -- model lifecycle ---------------------------------------------------
+    def load_model(
+        self,
+        data: "bytes | str",
+        *,
+        format: str = "mjb",  # noqa: A002 - wire field name
+        assets: Optional[Mapping[str, "bytes | str"]] = None,
+        timeout_ms: int = 120_000,
+    ) -> None:
+        """Hot-swap the server's model from any supported format.
+
+        ``format`` is ``"mjb"`` | ``"xml"`` | ``"mjz"``:
+
+        * ``mjb`` -- a compiled model, loaded directly (must be version-matched to
+          the server's MuJoCo; use ``mjbcompile``).
+        * ``xml`` -- MJCF source; the server compiles it with its OWN libmujoco, so
+          it is immune to MJB version skew. ``assets`` supplies the referenced mesh/
+          texture files (see :meth:`load_xml`, which gathers them for you).
+        * ``mjz`` -- a self-contained MuJoCo archive, decoded by the server's spec
+          decoder registry (``assets`` mounts any extras alongside).
+
+        The server (``MjModelSource::FromBytes``) normalises whatever arrives back to
+        an MJB with its own libmujoco, then swaps it into the live renderer.
+
+        ``data`` and each ``assets`` value may be raw bytes or a file path. Assets are
+        keyed by the **bare filename** the model references them under.
+        """
+        blob = data if isinstance(data, (bytes, bytearray)) else open(data, "rb").read()
+        req: Dict[str, object] = {
+            "op": "fastpath_load", "format": str(format), "model": bytes(blob),
+        }
+        if assets:
+            # Asset bytes ride as base64 STRINGS (the server reads each asset value
+            # as a base64 string). Unlike the top-level `model` bin -- which the
+            # transport's msgpack-bin -> `__b64__` convention handles -- a nested bin
+            # value would arrive under a `<name>__b64__` key and mount under the wrong
+            # filename, so encode these ourselves and keep the bare-name key intact.
+            enc: Dict[str, str] = {}
+            for name, val in assets.items():
+                raw = val if isinstance(val, (bytes, bytearray)) else open(val, "rb").read()
+                enc[name] = base64.b64encode(bytes(raw)).decode("ascii")
+            req["assets"] = enc
+        rep = self._t.rpc(req, recv_timeout_ms=timeout_ms)
+        _check(rep, "fastpath_load")
+
     def load_mjb(self, mjb: "bytes | str", *, timeout_ms: int = 120_000) -> None:
         """Hot-swap the server's model with a compiled MJB (raw bytes or a file path).
 
         Optional -- a server launched with ``-URLabFastMjb=<file>`` already has one.
         The MJB must be version-matched to the server's MuJoCo (use ``mjbcompile``).
         """
-        blob = mjb if isinstance(mjb, (bytes, bytearray)) else open(mjb, "rb").read()
-        rep = self._t.rpc({"op": "fastpath_load", "mjb": bytes(blob)},
-                          recv_timeout_ms=timeout_ms)
-        _check(rep, "fastpath_load")
+        self.load_model(mjb, format="mjb", timeout_ms=timeout_ms)
+
+    def load_xml(
+        self,
+        xml: "str | bytes",
+        *,
+        asset_root: Optional[str] = None,
+        assets: Optional[Mapping[str, "bytes | str"]] = None,
+        timeout_ms: int = 120_000,
+    ) -> None:
+        """Hot-swap the server's model from MJCF source + its assets.
+
+        ``xml`` is a path, an XML string, or an XML ``bytes`` blob. Every
+        ``<include>`` is inlined and each ``file=`` rewritten to a bare filename;
+        the referenced mesh/texture files are read from disk (relative to the XML,
+        or ``asset_root``) and shipped alongside. Pass ``assets`` (bare name -> bytes/
+        path) to supply any that aren't on disk; those take precedence.
+
+        The server compiles the XML with its own libmujoco, so there is no MJB
+        version-matching requirement.
+        """
+        from ._model_upload import flatten_model  # lazy: stdlib-only helper
+
+        xml_text, asset_paths = flatten_model(xml, asset_root=asset_root)
+        blobs: Dict[str, "bytes | str"] = {}
+        for name, path in asset_paths.items():
+            blobs[name] = path  # load_model reads paths itself
+        if assets:  # caller-supplied bytes/paths override on-disk lookups
+            blobs.update(dict(assets))
+        self.load_model(xml_text.encode("utf-8"), format="xml", assets=blobs,
+                        timeout_ms=timeout_ms)
+
+    def load_mjz(
+        self,
+        mjz: "bytes | str",
+        *,
+        assets: Optional[Mapping[str, "bytes | str"]] = None,
+        timeout_ms: int = 120_000,
+    ) -> None:
+        """Hot-swap the server's model from a MuJoCo ``.mjz`` archive (raw bytes or
+        a file path).
+
+        A ``.mjz`` is a zip of one MJCF plus its assets. The compact archive goes
+        straight over the wire; the server decodes it with MuJoCo's own C decoder
+        (``mj_parse`` into a VFS, then ``mj_compile`` against it) and compiles with
+        its own libmujoco. The archive's root model must be named ``model.xml`` (the
+        canonical layout MuJoCo's decoder expects). ``assets`` mounts extra files
+        alongside the archive's own.
+        """
+        self.load_model(mjz, format="mjz", assets=assets, timeout_ms=timeout_ms)
 
     # -- rendering ---------------------------------------------------------
     def render(
