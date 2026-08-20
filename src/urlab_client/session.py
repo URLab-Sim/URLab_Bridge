@@ -1,0 +1,265 @@
+# Copyright (c) 2026 Jonathan Embley-Riches. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Find and join live owner sessions -- the scriptable side of the peek.
+
+An *owner* (a Python client or a UE instance) advertises itself in the shared
+registry (role ``fastpath_owner``) with the transports a viewer can reach it on
+(ZMQ bus/control and/or a gRPC endpoint), its scene, and capabilities. This
+module discovers those, and joins one as a viewer (a mujoco/pystudio peek) or VR.
+
+CLI (``python -m urlab_client.session``):
+
+    session list [--endpoints h1:50051,h2:50051] [--registry DIR]
+    session join <target> --model scene.xml --mode viewer [--transport grpc|zmq]
+    session join <target> --model scene.xml --mode vr        # launches a UE viewer
+
+``target`` is an instance id, a host, or a ``host:port`` endpoint. The rich GUI
+server browser lives in the UE plugin (SMjServerBrowser); this is the headless
+counterpart over the same registry.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import List, Optional, Sequence, Tuple
+
+from .pool import default_registry_dir
+
+__all__ = ["OwnerInfo", "discover_owners", "format_table", "OWNER_ROLE"]
+
+OWNER_ROLE = "fastpath_owner"
+DEFAULT_GRPC_PORT = 50051
+
+
+@dataclass
+class OwnerInfo:
+    """One discoverable owner session."""
+
+    instance_id: str
+    host: str
+    scene: str = ""
+    role: str = OWNER_ROLE
+    caps: Tuple[str, ...] = ()
+    transports: Tuple[str, ...] = ()
+    bus: Optional[str] = None       # ZMQ viewer PUB (tcp://host:port)
+    control: Optional[str] = None   # ZMQ control REP (tcp://host:port)
+    grpc: Optional[str] = None      # host:port
+    pid: Optional[int] = None
+    updated: Optional[float] = None  # epoch seconds (normalized)
+    source: str = "registry"
+
+    def endpoint_for(self, transport: str) -> Optional[str]:
+        """The endpoint a viewer dials for the given transport."""
+        if transport == "grpc":
+            return self.grpc
+        if transport == "zmq":
+            return self.control  # perturb RPC target; the bus is separate
+        return None
+
+    def default_transport(self) -> str:
+        """Prefer gRPC when advertised, else ZMQ."""
+        if "grpc" in self.transports or self.grpc:
+            return "grpc"
+        return "zmq"
+
+
+def _normalize_time(v) -> Optional[float]:
+    """Registry timestamps are int-epoch (Python owner) or ISO8601 (UE)."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _host_of(endpoint: Optional[str]) -> str:
+    if not endpoint:
+        return ""
+    return endpoint.replace("tcp://", "", 1).split("/", 1)[0].split(":", 1)[0]
+
+
+def _owner_from_entry(data: dict) -> Optional[OwnerInfo]:
+    role = str(data.get("role", ""))
+    caps = tuple(str(c) for c in (data.get("capabilities") or []))
+    if role != OWNER_ROLE and OWNER_ROLE not in caps:
+        return None
+    transports = data.get("transports")
+    if not transports:
+        transports = ["zmq"] + (["grpc"] if data.get("grpc") else [])
+    host = str(data.get("host") or _host_of(data.get("bus") or data.get("control")))
+    return OwnerInfo(
+        instance_id=str(data.get("instance_id", "?")),
+        host=host,
+        scene=str(data.get("scene", "")),
+        role=role or OWNER_ROLE,
+        caps=caps,
+        transports=tuple(str(t) for t in transports),
+        bus=data.get("bus"),
+        control=data.get("control"),
+        grpc=data.get("grpc"),
+        pid=data.get("pid") if isinstance(data.get("pid"), int) else None,
+        updated=_normalize_time(data.get("registry_written_at")),
+        source="registry",
+    )
+
+
+def _owner_from_endpoint(ep: str) -> OwnerInfo:
+    """An explicitly-given endpoint (assumed a gRPC host:port)."""
+    s = ep.replace("tcp://", "", 1)
+    host, _, port = s.rpartition(":")
+    host = host or "127.0.0.1"
+    port = port or str(DEFAULT_GRPC_PORT)
+    return OwnerInfo(
+        instance_id=f"{host}:{port}", host=host, scene="(explicit)",
+        transports=("grpc",), grpc=f"{host}:{port}", source="endpoint",
+    )
+
+
+def discover_owners(
+    registry_dir: Optional[str] = None,
+    endpoints: Optional[Sequence[str]] = None,
+) -> List[OwnerInfo]:
+    """Owners from the registry directory plus any explicit ``endpoints``
+    (``["host:port", ...]`` -- assumed gRPC). Registry entries first."""
+    out: List[OwnerInfo] = []
+    rdir = registry_dir or default_registry_dir()
+    for path in sorted(glob.glob(os.path.join(rdir, "*.json"))):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        owner = _owner_from_entry(data)
+        if owner is not None:
+            out.append(owner)
+    for ep in (endpoints or []):
+        ep = ep.strip()
+        if ep:
+            out.append(_owner_from_endpoint(ep))
+    return out
+
+
+def format_table(owners: Sequence[OwnerInfo]) -> str:
+    """A compact list of sessions for the CLI."""
+    if not owners:
+        return "(no owner sessions found)"
+    rows = [("INSTANCE", "HOST", "SCENE", "TRANSPORTS", "CAPS")]
+    for o in owners:
+        rows.append((
+            o.instance_id[:24], o.host or "?", (o.scene or "-")[:20],
+            ",".join(o.transports) or "-", ",".join(o.caps) or "-",
+        ))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    return "\n".join(
+        "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
+        for row in rows
+    )
+
+
+def _resolve(target: str, owners: Sequence[OwnerInfo]) -> Optional[OwnerInfo]:
+    """Match a target (instance id / host / host:port) to a discovered owner, or
+    treat a bare host:port as an explicit gRPC endpoint."""
+    for o in owners:
+        if target in (o.instance_id, o.host, o.grpc):
+            return o
+    if ":" in target or target.replace(".", "").isdigit():
+        return _owner_from_endpoint(target)
+    for o in owners:
+        if o.host == target or o.instance_id.startswith(target):
+            return o
+    return None
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = argparse.ArgumentParser(prog="urlab_client.session", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def _common(p):
+        p.add_argument("--registry", default=None, help="registry dir (default: shared)")
+        p.add_argument("--endpoints", default=None,
+                       help="extra gRPC endpoints, comma-separated (h1:50051,h2:50051)")
+
+    pl = sub.add_parser("list", help="list discoverable owner sessions")
+    _common(pl)
+
+    pj = sub.add_parser("join", help="join an owner as a viewer or VR")
+    _common(pj)
+    pj.add_argument("target", help="instance id / host / host:port")
+    pj.add_argument("--model", required=True, help="scene xml/mjb the owner runs")
+    pj.add_argument("--mode", choices=["viewer", "vr"], default="viewer")
+    pj.add_argument("--transport", choices=["zmq", "grpc"], default=None,
+                    help="default: what the owner advertises")
+
+    args = ap.parse_args(argv)
+    eps = [e for e in (args.endpoints or "").split(",") if e]
+    owners = discover_owners(args.registry, eps)
+
+    if args.cmd == "list":
+        print(format_table(owners))
+        return 0
+
+    owner = _resolve(args.target, owners)
+    if owner is None:
+        print(f"no owner matched {args.target!r}; try 'session list'")
+        return 1
+    transport = args.transport or owner.default_transport()
+
+    if args.mode == "vr":
+        return _join_vr(owner)
+
+    # viewer: attach a Python peek over the chosen transport
+    from .peek import PeekViewer
+
+    control = owner.endpoint_for(transport)
+    bus = owner.bus if transport == "zmq" else None
+    if transport == "zmq" and not control:
+        print("owner advertises no ZMQ control endpoint; try --transport grpc")
+        return 1
+    print(f"joining {owner.instance_id} ({owner.host}) as viewer over {transport}")
+    PeekViewer(args.model, control=control, bus=bus, transport=transport).run()
+    return 0
+
+
+def _join_vr(owner: OwnerInfo) -> int:
+    """Launch a UE viewer instance pointed at the owner's state bus. The drone
+    free-fly pawn / VR level (Phase 5) lands on the UE side; until then this boots
+    the existing ViewerSubscribeTransport viewer, which renders the owner's sim."""
+    src = owner.bus or owner.control
+    if not src:
+        print("owner advertises no ZMQ viewer bus for a UE viewer; a UE-gRPC "
+              "viewer stream is pending (Phase 2 UE).")
+        return 1
+    ue = os.environ.get("URLAB_UE")
+    proj = os.environ.get("URLAB_UPROJECT")
+    if not ue or not proj:
+        print("set URLAB_UE and URLAB_UPROJECT to launch a UE VR viewer. Command:")
+        ue = ue or "<UnrealEditor>"
+        proj = proj or "<project.uproject>"
+    cmd = (f'{ue} {proj} /Game/FastPath/FastPathRender -game '
+           f'-URLabStateSource={src} -URLabVrViewer -windowed')
+    print(cmd)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

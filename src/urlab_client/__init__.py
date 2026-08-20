@@ -85,6 +85,7 @@ from .render_pool import (
     parse_endpoints,
 )
 from .peek import PeekViewer
+from .session import OwnerInfo, discover_owners
 from .enums import (
     ActuatorType,
     CameraMode,
@@ -163,6 +164,9 @@ __all__ = [
     "parse_endpoints",
     # live peek viewer (attach + push)
     "PeekViewer",
+    # session discovery / join
+    "OwnerInfo",
+    "discover_owners",
     "URLabArticulation",
     "URLabCameraView",
     "URLabController",
