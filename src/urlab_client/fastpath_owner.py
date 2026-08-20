@@ -83,10 +83,15 @@ class FastPathOwner:
         ngeom: int = 0,
         instance_id: Optional[str] = None,
         registry_dir: Optional[str] = None,
+        capabilities: Sequence[str] = ("view", "AcceptInput"),
     ) -> None:
         self._mjb = bytes(mjb_bytes)
         self._scene = scene
         self._ngeom = int(ngeom)
+        # Granted capabilities advertised in the registry. "view" = read-only peek
+        # is allowed; "AcceptInput" = interactive viewers may push perturbations.
+        # Drop "AcceptInput" for a look-but-don't-touch owner.
+        self._caps = {FASTPATH_OWNER_CAP} | {str(c) for c in capabilities}
         self._host = advertise_host or socket.gethostname()
         self._control_port = int(control_port)
         self._bus_port = int(bus_port)
@@ -139,6 +144,15 @@ class FastPathOwner:
 
     # -- properties --------------------------------------------------------- #
     @property
+    def capabilities(self) -> "tuple[str, ...]":
+        return tuple(sorted(self._caps))
+
+    @property
+    def accepts_input(self) -> bool:
+        """Whether interactive viewers may push perturbations (the AcceptInput cap)."""
+        return "AcceptInput" in self._caps
+
+    @property
     def scene(self) -> str:
         return self._scene
 
@@ -160,7 +174,7 @@ class FastPathOwner:
         entry = {
             "instance_id": self._instance_id,
             "role": FASTPATH_OWNER_CAP,
-            "capabilities": [FASTPATH_OWNER_CAP],
+            "capabilities": sorted(self._caps),
             "pid": self._pid,
             "host": self._host,
             "scene": self._scene,
@@ -224,11 +238,17 @@ class FastPathOwner:
             }
             return msgpack.packb(reply, use_bin_type=True)
         if op == "fastpath_perturb":
-            # A renderer pushes an external force/torque on a body. Accumulate it;
-            # the owner applies it to xfrc_applied on its next step. Force/torque
-            # are normalized to length 3 (padding short vectors) BEFORE indexing, so
-            # a truncated wire vector can't raise mid-handler and wedge the REP
-            # socket in a received-but-never-replied state.
+            # A renderer/viewer pushes an external force/torque on a body. Refused
+            # unless the AcceptInput capability is granted (mirrors UE's
+            # HandleFastpathPerturb capability check).
+            if not self.accepts_input:
+                return msgpack.packb(
+                    {"ok": False, "error": "capability disabled: AcceptInput"},
+                    use_bin_type=True)
+            # Accumulate it; the owner applies it to xfrc_applied on its next step.
+            # Force/torque are normalized to length 3 (padding short vectors) BEFORE
+            # indexing, so a truncated wire vector can't raise mid-handler and wedge
+            # the REP socket in a received-but-never-replied state.
             try:
                 self.submit_perturb(int(req.get("body", -1)),
                                     req.get("force", (0, 0, 0)),

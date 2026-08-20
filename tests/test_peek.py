@@ -152,6 +152,40 @@ def test_grpc_owner_stream_and_perturb(tmp_path):
         owner.close()
 
 
+def test_readonly_owner_refuses_perturb(tmp_path):
+    """An owner without the AcceptInput capability refuses fastpath_perturb."""
+    from urlab_client.fastpath_owner import FastPathOwner
+
+    owner = FastPathOwner(
+        b"", scene="t", control_port=_free_port(), bus_port=_free_port(),
+        advertise_host="127.0.0.1", registry_dir=str(tmp_path),
+        capabilities=("view",),  # look, don't touch
+    )
+    try:
+        assert owner.accepts_input is False
+        assert "AcceptInput" not in owner.capabilities and "view" in owner.capabilities
+        req = zmq.Context.instance().socket(zmq.REQ)
+        req.setsockopt(zmq.RCVTIMEO, 500)
+        req.setsockopt(zmq.SNDTIMEO, 500)
+        req.connect(owner.control_endpoint)
+        req.send(msgpack.packb(perturb_request(2, [1, 0, 0], [0, 0, 0]),
+                               use_bin_type=True))
+        rep = None
+        for _ in range(100):
+            owner.serve_pending()
+            try:
+                rep = msgpack.unpackb(req.recv(), raw=False)
+                break
+            except zmq.error.Again:
+                time.sleep(0.01)
+        req.close(0)
+        assert rep is not None and rep.get("ok") is False
+        assert "AcceptInput" in rep.get("error", "")
+        assert owner.drain_perturbations() == {}  # nothing accumulated
+    finally:
+        owner.close()
+
+
 def test_owner_accepts_peek_perturb(tmp_path):
     """A peek's perturb_request over the control channel is accepted + drained --
     the push-back half of the loop, end to end at the wire level."""

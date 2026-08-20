@@ -76,13 +76,18 @@ class _OwnerServicer:
         except Exception:  # noqa: BLE001
             req = {}
         if op == "fastpath_perturb":
+            if not self._owner.accepts_input:
+                return msgpack.packb(
+                    {"ok": False, "error": "capability disabled: AcceptInput"},
+                    use_bin_type=True)
             self._owner.submit_perturb(
                 req.get("body", -1), req.get("force", (0, 0, 0)),
                 req.get("torque", (0, 0, 0)))
             return msgpack.packb({"ok": True}, use_bin_type=True)
         if op == "fastpath_hello":
             return msgpack.packb(
-                {"ok": True, "scene": self._owner.scene, "ngeom": self._owner.ngeom},
+                {"ok": True, "scene": self._owner.scene, "ngeom": self._owner.ngeom,
+                 "capabilities": list(self._owner.capabilities)},
                 use_bin_type=True)
         return msgpack.packb(
             {"ok": False, "error": f"unknown op {op!r}"}, use_bin_type=True)
