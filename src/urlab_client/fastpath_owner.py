@@ -25,8 +25,9 @@ import json
 import os
 import socket
 import tempfile
+import threading
 import time
-from typing import Optional
+from typing import Optional, Sequence
 
 import msgpack
 import zmq
@@ -114,9 +115,16 @@ class FastPathOwner:
             self._registry_dir, f"fastpath_{self._instance_id}_{self._pid}.json"
         )
         self._last_registry_write = 0.0
-        # Pending external perturbations from renderers: body id -> 6-vector
+        # Pending external perturbations from renderers/viewers: body id -> 6-vector
         # (fx,fy,fz,tx,ty,tz) in MuJoCo world frame. Drained by the owner each step.
-        self._perturb: dict[int, list[float]] = {}
+        # Guarded by _lock because a gRPC server (optional) submits from its own
+        # threads; the latest published {t,qpos,qvel} is cached here too so a gRPC
+        # subscribe stream can read it.
+        self._lock = threading.Lock()
+        self._perturb: "dict[int, list[float]]" = {}
+        self._latest_state: "Optional[tuple[float, list, list]]" = None
+        self._grpc_server = None  # optional; started by start_grpc_server()
+        self._grpc_endpoint: Optional[str] = None
         self._write_registry()
 
     # -- model swap --------------------------------------------------------- #
@@ -130,6 +138,14 @@ class FastPathOwner:
         self._write_registry()  # refresh advertised ngeom
 
     # -- properties --------------------------------------------------------- #
+    @property
+    def scene(self) -> str:
+        return self._scene
+
+    @property
+    def ngeom(self) -> int:
+        return self._ngeom
+
     @property
     def bus_endpoint(self) -> str:
         return self._bus_endpoint
@@ -153,6 +169,10 @@ class FastPathOwner:
             "control_port": self._control_port,
             "bus": self._bus_endpoint,
             "bus_port": self._bus_port,
+            # Which transports viewers can reach this owner on. "zmq" is always up
+            # (control REP + viewer PUB); "grpc" is added once start_grpc_server ran.
+            "transports": ["zmq"] + (["grpc"] if getattr(self, "_grpc_endpoint", None) else []),
+            "grpc": getattr(self, "_grpc_endpoint", None),
             # int epoch so both the UE reader and pool.py parse it (pool.py only
             # accepts a numeric registry_written_at).
             "registry_written_at": int(time.time()),
@@ -210,14 +230,9 @@ class FastPathOwner:
             # a truncated wire vector can't raise mid-handler and wedge the REP
             # socket in a received-but-never-replied state.
             try:
-                body = int(req.get("body", -1))
-                force = _vec3(req.get("force", (0, 0, 0)))
-                torque = _vec3(req.get("torque", (0, 0, 0)))
-                if body >= 0:
-                    acc = self._perturb.setdefault(body, [0.0] * 6)
-                    for i in range(3):
-                        acc[i] += force[i]
-                        acc[i + 3] += torque[i]
+                self.submit_perturb(int(req.get("body", -1)),
+                                    req.get("force", (0, 0, 0)),
+                                    req.get("torque", (0, 0, 0)))
                 return msgpack.packb({"ok": True}, use_bin_type=True)
             except (TypeError, ValueError):
                 return msgpack.packb({"error": "bad perturb"}, use_bin_type=True)
@@ -225,12 +240,33 @@ class FastPathOwner:
             {"error": f"unknown op {op!r}"}, use_bin_type=True
         )
 
+    def submit_perturb(self, body: int, force, torque) -> None:
+        """Accumulate a body force/torque (thread-safe; called by the ZMQ REP AND
+        an optional gRPC server). force/torque are padded to length 3 first, so a
+        truncated wire vector can't raise. Ignored for a negative body id."""
+        body = int(body)
+        if body < 0:
+            return
+        f, t = _vec3(force), _vec3(torque)
+        with self._lock:
+            acc = self._perturb.setdefault(body, [0.0] * 6)
+            for i in range(3):
+                acc[i] += f[i]
+                acc[i + 3] += t[i]
+
     def drain_perturbations(self) -> "dict[int, list[float]]":
         """Return the accumulated {body_id: 6-vector} perturbations and clear
         them. Apply the result to ``data.xfrc_applied`` before the next step."""
-        perts = self._perturb
-        self._perturb = {}
+        with self._lock:
+            perts = self._perturb
+            self._perturb = {}
         return perts
+
+    def latest_state(self) -> "Optional[tuple[float, list, list]]":
+        """The most recent ``(t, qpos, qvel)`` given to :meth:`publish_state`, or
+        None. Read by an optional gRPC subscribe stream; thread-safe."""
+        with self._lock:
+            return self._latest_state
 
     # -- transform bus ------------------------------------------------------ #
     def _send_transforms(self, payload: dict, cxpos, cxquat, usercam=None) -> None:
@@ -305,11 +341,11 @@ class FastPathOwner:
         uses the exact wire format UE's ViewerSubscribeTransport consumes, so the
         same bus feeds a Python peek and a UE viewer alike. Best-effort: a slow or
         absent subscriber never stalls the sim."""
-        payload = {
-            "t": float(t),
-            "qpos": [float(x) for x in qpos],
-            "qvel": [float(x) for x in qvel],
-        }
+        qpos_l = [float(x) for x in qpos]
+        qvel_l = [float(x) for x in qvel]
+        with self._lock:
+            self._latest_state = (float(t), qpos_l, qvel_l)  # for the gRPC stream
+        payload = {"t": float(t), "qpos": qpos_l, "qvel": qvel_l}
         try:
             self._pub.send_multipart(
                 [b"viewer", msgpack.packb(payload, use_bin_type=True)],
@@ -318,8 +354,29 @@ class FastPathOwner:
         except zmq.ZMQError:
             pass
 
+    # -- optional gRPC face ------------------------------------------------- #
+    def start_grpc_server(self, port: int = 50051, bind: str = "0.0.0.0") -> str:
+        """Serve this owner over gRPC too (viewers subscribe + perturb over gRPC,
+        not just ZMQ). Returns the ``host:port`` it listens on. Idempotent."""
+        if self._grpc_server is not None:
+            return self._grpc_server.endpoint
+        from .owner_server import OwnerGrpcServer
+
+        self._grpc_server = OwnerGrpcServer(self, port=port, bind=bind)
+        self._grpc_server.start()
+        # Advertise the gRPC endpoint in the registry for discovery.
+        self._grpc_endpoint = f"{self._host}:{port}"
+        self._write_registry()
+        return self._grpc_server.endpoint
+
     # -- lifecycle ---------------------------------------------------------- #
     def close(self) -> None:
+        if self._grpc_server is not None:
+            try:
+                self._grpc_server.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._grpc_server = None
         try:
             os.remove(self._registry_path)
         except OSError:

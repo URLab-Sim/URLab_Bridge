@@ -112,6 +112,46 @@ def test_transport_viewer_stream_roundtrip(tmp_path):
         owner.close()
 
 
+def test_grpc_owner_stream_and_perturb(tmp_path):
+    """The Python owner gRPC server: subscribe_viewer streams {t,qpos,qvel} and
+    fastpath_perturb accumulates -- both driven through GrpcTransport."""
+    import queue
+
+    from urlab_client.fastpath_owner import FastPathOwner
+    from urlab_client.peek import perturb_request
+    from urlab_client.transports import make_transport
+
+    grpc_port = _free_port()
+    owner = FastPathOwner(
+        b"", scene="t", control_port=_free_port(), bus_port=_free_port(),
+        advertise_host="127.0.0.1", registry_dir=str(tmp_path),
+    )
+    owner.start_grpc_server(port=grpc_port)
+    t = make_transport("grpc", address="127.0.0.1", step_port=grpc_port,
+                       recv_timeout_ms=3000)
+    got: "queue.Queue" = queue.Queue()
+    try:
+        t.start_viewer_stream(lambda f: got.put(f))
+        frame = None
+        for i in range(200):  # keep publishing new frames until one is streamed back
+            owner.publish_state(5.0 + i * 0.01, [1.0, 2.0, 3.0], [0.0])
+            try:
+                frame = got.get(timeout=0.05)
+                break
+            except queue.Empty:
+                continue
+        assert frame is not None, "no viewer frame streamed over gRPC"
+        assert list(frame["qpos"]) == [1.0, 2.0, 3.0]
+
+        reply = t.rpc(perturb_request(2, [1.0, 0.0, 0.0], [0.0, 0.0, 0.5]),
+                      recv_timeout_ms=3000)
+        assert reply.get("ok") is True
+        assert owner.drain_perturbations() == {2: [1.0, 0.0, 0.0, 0.0, 0.0, 0.5]}
+    finally:
+        t.close()
+        owner.close()
+
+
 def test_owner_accepts_peek_perturb(tmp_path):
     """A peek's perturb_request over the control channel is accepted + drained --
     the push-back half of the loop, end to end at the wire level."""
