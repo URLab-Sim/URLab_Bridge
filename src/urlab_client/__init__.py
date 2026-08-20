@@ -78,6 +78,12 @@ from .render_client import (
     poses_from_mjdata,
 )
 from . import viewer_sync
+from .render_pool import (
+    InstanceSpec,
+    RenderPool,
+    RenderPoolError,
+    parse_endpoints,
+)
 from .enums import (
     ActuatorType,
     CameraMode,
@@ -149,6 +155,11 @@ __all__ = [
     "USER_CAMERA",
     "UserPose",
     "viewer_sync",
+    # multi-instance render pool
+    "RenderPool",
+    "InstanceSpec",
+    "RenderPoolError",
+    "parse_endpoints",
     "URLabArticulation",
     "URLabCameraView",
     "URLabController",

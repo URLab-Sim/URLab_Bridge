@@ -98,6 +98,61 @@ listening (instead of an opaque hang). A single render that exceeds its
 `timeout_ms` raises `URLabTimeoutError` — that's the caller's declared deadline;
 catch it to skip one slow frame, the connection stays up.
 
+## 6. Rendering across a pool (parallel, many instances)
+
+One instance renders its cameras **sequentially**. To parallelize, run several
+render-server instances and split the cameras across them with `RenderPool` —
+same `load_*` / `render_mjdata` surface as `RenderClient`, fanned out.
+
+**Try it in one command (local demo):**
+```
+bash examples/launch_local_pool.sh 3          # boots 3 local instances + renders across them
+# point it at your build with URLAB_UE / URLAB_UPROJECT / URLAB_MAP env vars
+```
+That script is the local stand-in for the real setup: in production an **external
+orchestrator** launches the instances (below) and the client just attaches.
+
+An **external orchestrator** launches the instances (across the network and/or
+several on one host) and hands the pool their addresses. Same-host instances each
+need a distinct gRPC port via `-URLabDmEnvPort=` (plus a distinct
+`-URLabInstanceIndex=` so their ZMQ ports don't collide):
+
+```
+# instance 0
+... -URLabFastServe -URLabFastForcedOnly -URLabFastCameras \
+    -URLabInstanceIndex=0 -URLabDmEnvPort=50051
+# instance 1
+... -URLabInstanceIndex=1 -URLabDmEnvPort=50052
+```
+Cross-host instances each just bind `:50051` on their own machine — no flag needed.
+
+The pool takes its endpoints from a **JSON config file** or an **explicit list**
+(what a `--endpoints` CLI flag passes):
+
+```python
+from urlab_client import RenderPool
+
+# config file: {"instances": [{"host":"10.0.0.1","port":50051}, {"host":"10.0.0.2","port":50051}]}
+with RenderPool.from_config("pool.json") as pool:          # or $URLAB_RENDER_POOL
+    pool.load_xml("scene.xml")                             # broadcast to ALL, in parallel
+    frames = pool.render_mjdata(model, data)              # all cameras, auto-split N ways
+
+# or explicit endpoints (from a CLI --endpoints)
+pool = RenderPool.from_endpoints("10.0.0.1:50051,10.0.0.2:50051")
+```
+
+Rules:
+- **Cameras are distributed automatically** — each render splits the requested
+  cameras evenly across the whole pool. There is no manual per-instance mapping.
+- **Everything fans out concurrently** — both `load_*` and every `render` dispatch
+  to all endpoints at once and join (wall-clock ≈ the slowest instance, not the
+  sum). The pool never loops instances sequentially.
+- If `USER_CAMERA` is requested, only the instance it lands on gets `user_pose`.
+- A hard per-instance failure raises `RenderPoolError` (with `.failures` naming the
+  endpoints); transient stream drops self-heal via the transport's reconnect.
+- Speedup is real on multiple GPUs / uncapped hardware (the orchestrator's target);
+  on a single shared GPU it helps partially (the GPU is the shared bottleneck).
+
 ## TL;DR for a downstream agent
 
 1. Boot the server with `-URLabFastServe -URLabFastForcedOnly -URLabFastCameras`.
