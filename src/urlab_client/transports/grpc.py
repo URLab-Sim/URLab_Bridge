@@ -28,6 +28,21 @@ here and raise ``NotImplementedError`` -- RenderClient never calls them.
 
 The server binds ``0.0.0.0:50051`` (``UURLabDmEnvRpcTransport::ListenPort``), so
 the default port here is 50051, not the ZMQ step port 5559.
+
+Robustness. The bidi stream is a single shared channel, so ``rpc()`` serialises
+under a lock and is hardened three ways so a downstream user never has to babysit
+the connection:
+
+* **Fail-fast connect** -- a fresh channel is waited to READY within
+  ``connect_timeout_s``; nothing listening surfaces as a clear ``ConnectionError``
+  naming the target, not an opaque render timeout.
+* **Transparent reconnect** -- a *broken* stream (server restart, idle reap, a
+  half-open socket) is rebuilt and the request re-sent once. A *timeout* is the
+  caller's declared deadline and is surfaced, not retried.
+* **Sequence-id validation** -- every request stamps ``sequence_id`` and the
+  server echoes it; a mismatched reply means the stream desynced (a stale reply
+  from an abandoned call) and is treated as a broken stream so the reconnect path
+  realigns instead of handing back the wrong frame.
 """
 
 from __future__ import annotations
@@ -49,6 +64,11 @@ except ImportError:  # pragma: no cover
 DEFAULT_DMENV_PORT = 50051
 
 
+class _StreamBroken(Exception):
+    """Internal: the bidi stream is unusable (dropped / desynced / errored) and
+    must be torn down and rebuilt. Never escapes ``rpc()``."""
+
+
 class GrpcTransport(Transport):
     """dm_env_rpc bidi-stream RPC transport (request/reply only)."""
 
@@ -58,12 +78,14 @@ class GrpcTransport(Transport):
         *,
         step_port: int = DEFAULT_DMENV_PORT,
         recv_timeout_ms: int = 5000,
+        connect_timeout_s: float = 5.0,
     ) -> None:
         # gRPC targets are bare "host:port"; accept a tcp://host[:port] address
         # for parity with the other transports and take only its host.
         host = address.replace("tcp://", "", 1).split("/", 1)[0].split(":", 1)[0]
         self._target = f"{host or '127.0.0.1'}:{step_port}"
         self._recv_timeout_ms = recv_timeout_ms
+        self._connect_timeout_s = float(connect_timeout_s)
 
         self._lock = threading.Lock()
         self._seq = 0
@@ -72,7 +94,8 @@ class GrpcTransport(Transport):
         self._req_q: "queue.Queue[Any]" = queue.Queue()
         # A single-thread executor lets us bound each blocking next() on the
         # response iterator by a per-call timeout without cancelling gRPC's own
-        # (stream-wide) deadline.
+        # (stream-wide) deadline. It is replaced on every reset so a timed-out
+        # next() left blocked on a dead iterator can't starve the next call.
         self._recv_exec = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="URLabDmEnvRecv"
         )
@@ -91,14 +114,37 @@ class GrpcTransport(Transport):
         from ._dmenv import dm_env_rpc_pb2_grpc  # lazy: only when grpc is used
 
         # -1 == unlimited, matching the server's SetMax*MessageSize(-1); camera
-        # frames (BGRA8 at 1280x720+) exceed the 4 MB gRPC default.
+        # frames (BGRA8 at 1280x720+) exceed the 4 MB gRPC default. Keepalive keeps
+        # an idle stream from being reaped by a NAT/proxy between renders.
         self._channel = grpc.insecure_channel(
             self._target,
             options=[
                 ("grpc.max_send_message_length", -1),
                 ("grpc.max_receive_message_length", -1),
+                ("grpc.keepalive_time_ms", 20000),
+                ("grpc.keepalive_timeout_ms", 10000),
+                ("grpc.keepalive_permit_without_calls", 1),
+                ("grpc.http2.max_pings_without_data", 0),
             ],
         )
+        # Fail fast with a clear message if nothing is listening yet, rather than
+        # letting the first next() block until the RPC timeout and surface as an
+        # opaque "render timed out".
+        try:
+            grpc.channel_ready_future(self._channel).result(
+                timeout=self._connect_timeout_s
+            )
+        except grpc.FutureTimeoutError as exc:
+            ch, self._channel = self._channel, None
+            try:
+                ch.close()
+            except Exception:  # pragma: no cover
+                pass
+            raise ConnectionError(
+                f"render server not reachable at {self._target} "
+                f"(no gRPC listener within {self._connect_timeout_s:.0f}s)"
+            ) from exc
+
         stub = dm_env_rpc_pb2_grpc.EnvironmentStub(self._channel)
 
         def _request_gen():
@@ -130,47 +176,70 @@ class GrpcTransport(Transport):
         )
         op = str(request.get("op", ""))
 
-        with self._lock:
-            self._ensure_stream()
-            self._seq += 1
-            packet = urlab_dm_env_rpc_pb2.UrlabPacket(
-                op=op, payload=bytes(payload), sequence_id=self._seq
+        # One transparent reconnect: a broken/dropped bidi stream is rebuilt and
+        # the request re-sent. A *timeout* is the caller's declared deadline and
+        # is NOT retried here -- it surfaces so the caller decides how long to wait.
+        conn_err: Optional[BaseException] = None
+        for _attempt in range(2):
+            with self._lock:
+                try:
+                    return self._rpc_locked(
+                        op, bytes(payload), timeout_ms,
+                        dm_env_rpc_pb2, urlab_dm_env_rpc_pb2,
+                    )
+                except URLabTimeoutError:
+                    self._reset_stream()
+                    raise
+                except _StreamBroken as exc:
+                    conn_err = exc.__cause__ or exc
+                    self._reset_stream()
+                    # fall out of the lock, then rebuild + resend on the next pass
+        raise ConnectionError(
+            f"render server RPC {op!r} failed after reconnect to {self._target}: "
+            f"{conn_err}"
+        ) from conn_err
+
+    def _rpc_locked(
+        self, op, payload, timeout_ms, dm_env_rpc_pb2, urlab_dm_env_rpc_pb2
+    ) -> Mapping[str, Any]:
+        # Caller holds self._lock.
+        self._ensure_stream()
+        self._seq += 1
+        seq = self._seq
+        packet = urlab_dm_env_rpc_pb2.UrlabPacket(
+            op=op, payload=payload, sequence_id=seq
+        )
+        env = dm_env_rpc_pb2.EnvironmentRequest()
+        env.extension.Pack(packet)
+        self._req_q.put(env)
+
+        try:
+            # next() blocks until UE renders + replies; bound it so a dead server
+            # surfaces as a timeout instead of hanging the caller.
+            resp = self._recv_exec.submit(next, self._resp_iter).result(
+                timeout=timeout_ms / 1000.0
             )
-            env = dm_env_rpc_pb2.EnvironmentRequest()
-            env.extension.Pack(packet)
-            self._req_q.put(env)
+        except concurrent.futures.TimeoutError as exc:
+            raise URLabTimeoutError(
+                f"RPC {op!r} over gRPC", waited_s=timeout_ms / 1000.0, op=op
+            ) from exc
+        except StopIteration as exc:
+            raise _StreamBroken(f"stream closed by server during {op!r}") from exc
+        except Exception as exc:  # gRPC RpcError, channel teardown, etc.
+            raise _StreamBroken(f"stream error during {op!r}: {exc}") from exc
 
-            try:
-                # next() blocks until UE renders + replies; bound it so a dead
-                # server surfaces as a timeout instead of hanging the caller.
-                resp = self._recv_exec.submit(next, self._resp_iter).result(
-                    timeout=timeout_ms / 1000.0
-                )
-            except concurrent.futures.TimeoutError as exc:
-                self._reset_stream()
-                raise URLabTimeoutError(
-                    f"RPC {op!r} over gRPC",
-                    waited_s=timeout_ms / 1000.0,
-                    op=op,
-                ) from exc
-            except StopIteration as exc:
-                self._reset_stream()
-                raise RuntimeError(
-                    f"gRPC stream closed by server during {op!r}"
-                ) from exc
-            except Exception:
-                self._reset_stream()
-                raise
-
-            out = urlab_dm_env_rpc_pb2.UrlabPacket()
-            if not resp.extension.Unpack(out):
-                raise RuntimeError(
-                    f"gRPC reply for {op!r} carried no UrlabPacket extension"
-                )
-            reply = msgpack.unpackb(
-                bytes(out.payload), raw=False, strict_map_key=False
+        out = urlab_dm_env_rpc_pb2.UrlabPacket()
+        if not resp.extension.Unpack(out):
+            raise _StreamBroken(f"reply for {op!r} carried no UrlabPacket extension")
+        # The server echoes the request's sequence_id; a mismatch means the stream
+        # desynced (a stale reply from an abandoned call), so realign via reconnect
+        # instead of returning the wrong frame. (0 == a legacy server that does not
+        # echo -> skip the check for back-compat.)
+        if out.sequence_id and out.sequence_id != seq:
+            raise _StreamBroken(
+                f"reply seq {out.sequence_id} != request seq {seq} for {op!r}"
             )
-
+        reply = msgpack.unpackb(bytes(out.payload), raw=False, strict_map_key=False)
         if not isinstance(reply, dict):
             raise RuntimeError(f"non-dict reply: {type(reply).__name__}")
         return reply
@@ -191,6 +260,13 @@ class GrpcTransport(Transport):
         self._channel = None
         self._resp_iter = None
         self._req_q = queue.Queue()
+        # Replace the single-worker executor: a timed-out next() may still be
+        # blocked on the old (now-closed) iterator, and a fresh executor keeps the
+        # next call's recv from queueing behind that zombie thread.
+        old_exec, self._recv_exec = self._recv_exec, concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="URLabDmEnvRecv"
+        )
+        old_exec.shutdown(wait=False)
 
     # -- streams (unsupported over dm_env_rpc here) ------------------------
     def start_state_stream(self, on_snapshot: SnapshotCallback) -> None:

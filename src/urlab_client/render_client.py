@@ -40,13 +40,24 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .transports import Transport, make_transport
 
-__all__ = ["RenderClient", "CameraFrame", "RenderError", "poses_from_mjdata"]
+__all__ = [
+    "RenderClient", "CameraFrame", "RenderError", "poses_from_mjdata",
+    "USER_CAMERA", "UserPose",
+]
+
+# Canonical name the render server reports the free/user camera under. Add it to
+# a render's ``cameras`` list to receive its frame; drive it via ``user_pose``.
+USER_CAMERA = "user"
+
+# A free/user camera pose: (eye position, view direction, up), each a MuJoCo-world
+# 3-vector. Exactly what viewer_sync.free_camera_pose() yields.
+UserPose = Tuple[Sequence[float], Sequence[float], Sequence[float]]
 
 
 class RenderError(RuntimeError):
@@ -132,6 +143,34 @@ class RenderClient:
         )
         self._frame = 0
 
+    # -- constructors ------------------------------------------------------
+    @classmethod
+    def grpc(
+        cls, host: str = "127.0.0.1", port: int = 50051, *,
+        recv_timeout_ms: int = 5000,
+    ) -> "RenderClient":
+        """Connect over dm_env_rpc (gRPC). ``port`` is the UE ListenPort (50051).
+
+        The one-liner most downstream users want -- no transport string, no
+        ``tcp://`` prefix::
+
+            with RenderClient.grpc("127.0.0.1") as rc:
+                rc.load_xml("scene.xml")
+        """
+        return cls(host, step_port=port, transport="grpc",
+                   recv_timeout_ms=recv_timeout_ms)
+
+    @classmethod
+    def zmq(
+        cls, host: str = "127.0.0.1", port: int = 5559, *,
+        recv_timeout_ms: int = 5000,
+    ) -> "RenderClient":
+        """Connect over ZMQ. ``host`` may be a bare host or a ``tcp://`` address;
+        ``port`` is the bridge step port (5559)."""
+        address = host if host.startswith("tcp://") else f"tcp://{host}"
+        return cls(address, step_port=port, transport="zmq",
+                   recv_timeout_ms=recv_timeout_ms)
+
     # -- model lifecycle ---------------------------------------------------
     def load_model(
         self,
@@ -159,7 +198,7 @@ class RenderClient:
         ``data`` and each ``assets`` value may be raw bytes or a file path. Assets are
         keyed by the **bare filename** the model references them under.
         """
-        blob = data if isinstance(data, (bytes, bytearray)) else open(data, "rb").read()
+        blob = data if isinstance(data, (bytes, bytearray)) else _read_file(data)
         req: Dict[str, object] = {
             "op": "fastpath_load", "format": str(format), "model": bytes(blob),
         }
@@ -171,7 +210,7 @@ class RenderClient:
             # filename, so encode these ourselves and keep the bare-name key intact.
             enc: Dict[str, str] = {}
             for name, val in assets.items():
-                raw = val if isinstance(val, (bytes, bytearray)) else open(val, "rb").read()
+                raw = val if isinstance(val, (bytes, bytearray)) else _read_file(val)
                 enc[name] = base64.b64encode(bytes(raw)).decode("ascii")
             req["assets"] = enc
         rep = self._t.rpc(req, recv_timeout_ms=timeout_ms)
@@ -244,6 +283,7 @@ class RenderClient:
         cxquat: Optional[Sequence[float]] = None,
         sim_time: float = 0.0,
         cameras: Optional[Sequence[str]] = None,
+        user_pose: Optional[UserPose] = None,
         delay: int = 0,
         timeout_ms: int = 2000,
     ) -> Dict[str, CameraFrame]:
@@ -252,6 +292,12 @@ class RenderClient:
         ``cameras`` selects which cameras to render (None = all; naming one is far
         cheaper -- each camera is a full scene capture). ``delay`` in substeps: 0 =
         fresh/blocking, >0 = stale-from-ring (faster, real-camera-latency emulation).
+
+        ``user_pose`` drives the render server's free/user camera -- a ``(pos, fwd,
+        up)`` triple of MuJoCo-world 3-vectors (the eye position, view direction,
+        and up vector, exactly what :func:`urlab_client.viewer_sync.free_camera_pose`
+        returns for any MuJoCo viewer's camera). It is a *viewer* camera, so add
+        :data:`USER_CAMERA` (``"user"``) to ``cameras`` to get its frame back.
         """
         req: Dict[str, object] = {
             "op": "fastpath_render", "f": self._frame, "frame_id": self._frame,
@@ -263,6 +309,11 @@ class RenderClient:
             req["cxpos"] = _tolist(cxpos)
         if cxquat is not None:
             req["cxquat"] = _tolist(cxquat)
+        if user_pose is not None:
+            upos, ufwd, uup = user_pose
+            req["ucpos"] = _tolist(upos)
+            req["ucfwd"] = _tolist(ufwd)
+            req["ucup"] = _tolist(uup)
         if cameras:
             req["cameras"] = list(cameras)
         if delay:
@@ -274,12 +325,16 @@ class RenderClient:
 
     def render_mjdata(
         self, model, data, *, cameras: Optional[Sequence[str]] = None,
-        delay: int = 0, timeout_ms: int = 2000,
+        user_pose: Optional[UserPose] = None, delay: int = 0,
+        timeout_ms: int = 2000,
     ) -> Dict[str, CameraFrame]:
-        """Convenience: render straight from a mujoco ``(model, data)`` pair."""
+        """Convenience: render straight from a mujoco ``(model, data)`` pair.
+
+        ``user_pose`` (see :meth:`render`) drives the free/user camera; add
+        :data:`USER_CAMERA` to ``cameras`` to receive its frame."""
         return self.render(
-            sim_time=float(data.time), cameras=cameras, delay=delay,
-            timeout_ms=timeout_ms, **poses_from_mjdata(model, data),
+            sim_time=float(data.time), cameras=cameras, user_pose=user_pose,
+            delay=delay, timeout_ms=timeout_ms, **poses_from_mjdata(model, data),
         )
 
     def camera_names(self) -> List[str]:
@@ -302,6 +357,11 @@ class RenderClient:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def _read_file(path: "str") -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
 
 
 def _tolist(a) -> list:

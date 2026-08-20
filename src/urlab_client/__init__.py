@@ -69,7 +69,15 @@ from .articulation import (
     URLabPDController,
 )
 from .client import Readiness, URLabClient
-from .render_client import CameraFrame, RenderClient, RenderError, poses_from_mjdata
+from .render_client import (
+    USER_CAMERA,
+    CameraFrame,
+    RenderClient,
+    RenderError,
+    UserPose,
+    poses_from_mjdata,
+)
+from . import viewer_sync
 from .enums import (
     ActuatorType,
     CameraMode,
@@ -138,6 +146,9 @@ __all__ = [
     "CameraFrame",
     "RenderError",
     "poses_from_mjdata",
+    "USER_CAMERA",
+    "UserPose",
+    "viewer_sync",
     "URLabArticulation",
     "URLabCameraView",
     "URLabController",
