@@ -80,6 +80,38 @@ def test_owner_publish_state_roundtrip(tmp_path):
         owner.close()
 
 
+def test_transport_viewer_stream_roundtrip(tmp_path):
+    """ZmqTransport.start_viewer_stream receives frames an owner publish_states."""
+    import queue
+
+    from urlab_client.fastpath_owner import FastPathOwner
+    from urlab_client.transports import make_transport
+
+    ctrl_port, bus_port = _free_port(), _free_port()
+    owner = FastPathOwner(
+        b"", scene="t", control_port=ctrl_port, bus_port=bus_port,
+        advertise_host="127.0.0.1", registry_dir=str(tmp_path),
+    )
+    t = make_transport("zmq", address="tcp://127.0.0.1", step_port=ctrl_port)
+    got: "queue.Queue" = queue.Queue()
+    try:
+        t.start_viewer_stream(lambda f: got.put(f), endpoint=owner.bus_endpoint)
+        frame = None
+        for _ in range(100):  # slow-joiner: publish until the SUB attaches
+            owner.publish_state(3.0, [1.0, 2.0], [0.5])
+            try:
+                frame = got.get(timeout=0.05)
+                break
+            except queue.Empty:
+                continue
+        assert frame is not None, "no viewer frame delivered to the transport stream"
+        assert list(frame["qpos"]) == [1.0, 2.0]
+        assert frame["t"] == 3.0
+    finally:
+        t.close()
+        owner.close()
+
+
 def test_owner_accepts_peek_perturb(tmp_path):
     """A peek's perturb_request over the control channel is accepted + drained --
     the push-back half of the loop, end to end at the wire level."""

@@ -83,6 +83,9 @@ class ZmqTransport(Transport):
         # to raw kinematics. Lazily bound by enable_viewer_broadcast().
         self._viewer_pub: Any = None
         self._viewer_endpoint: Optional[str] = None
+        # Viewer bus SUBSCRIBER (the read side, for a peek/viewer).
+        self._viewer_sub_stop: Optional[threading.Event] = None
+        self._viewer_sub_thread: Optional[threading.Thread] = None
 
     # -- RPC --------------------------------------------------------------
 
@@ -250,6 +253,79 @@ class ZmqTransport(Transport):
             self._state_stop.wait(backoff)
             backoff = min(backoff * 2.0, _STREAM_RECONNECT_MAX_S)
         logger.debug("ZmqTransport state stream loop exited")
+
+    # -- viewer bus consumer ----------------------------------------------
+
+    def start_viewer_stream(self, on_frame, *, endpoint=None) -> None:
+        if self._viewer_sub_thread is not None and self._viewer_sub_thread.is_alive():
+            return
+        ep = endpoint or self._viewer_endpoint
+        if not ep:
+            raise ValueError(
+                "start_viewer_stream needs an owner viewer endpoint (tcp://host:port)")
+        self._viewer_sub_stop = threading.Event()
+        self._viewer_sub_thread = threading.Thread(
+            target=self._viewer_loop, args=(on_frame, ep),
+            name="URLabViewerSub", daemon=True,
+        )
+        self._viewer_sub_thread.start()
+
+    def stop_viewer_stream(self) -> None:
+        if self._viewer_sub_stop is not None:
+            self._viewer_sub_stop.set()
+        if self._viewer_sub_thread is not None:
+            self._viewer_sub_thread.join(timeout=5.0)
+            self._viewer_sub_thread = None
+        self._viewer_sub_stop = None
+
+    def _viewer_loop(self, on_frame, endpoint: str) -> None:
+        # Mirrors _state_loop but subscribes the owner's viewer PUB (topic
+        # "viewer", {t,qpos,qvel}) instead of the server state/full snapshot.
+        if zmq is None or msgpack is None:
+            return
+        assert self._viewer_sub_stop is not None
+        if self._ctx is None:
+            self._ctx = zmq.Context()
+        backoff = _STREAM_RECONNECT_MIN_S
+        while not self._viewer_sub_stop.is_set():
+            sock = self._ctx.socket(zmq.SUB)
+            sock.setsockopt(zmq.LINGER, 0)
+            try:
+                sock.connect(endpoint)
+                sock.setsockopt(zmq.SUBSCRIBE, self._VIEWER_TOPIC)
+                sock.setsockopt(zmq.RCVTIMEO, 200)
+                while not self._viewer_sub_stop.is_set():
+                    try:
+                        parts = sock.recv_multipart()
+                    except zmq.Again:
+                        continue
+                    backoff = _STREAM_RECONNECT_MIN_S
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        frame = msgpack.unpackb(
+                            parts[-1], raw=False, strict_map_key=False)
+                    except Exception as exc:
+                        logger.debug("viewer frame decode failed: %s", exc)
+                        continue
+                    try:
+                        on_frame(frame)
+                    except Exception as exc:  # pragma: no cover - callback-defensive
+                        logger.debug("viewer frame callback raised: %s", exc)
+            except Exception as exc:
+                logger.warning(
+                    "ZmqTransport viewer stream error (%s); reconnecting in %.2fs",
+                    exc, backoff)
+            finally:
+                try:
+                    sock.close(linger=0)
+                except Exception:
+                    pass
+            if self._viewer_sub_stop.is_set():
+                break
+            self._viewer_sub_stop.wait(backoff)
+            backoff = min(backoff * 2.0, _STREAM_RECONNECT_MAX_S)
+        logger.debug("ZmqTransport viewer stream loop exited")
 
     # -- camera streams ---------------------------------------------------
 
@@ -423,6 +499,7 @@ class ZmqTransport(Transport):
         # REQ socket, then term the context. Reverse ordering races
         # libzmq's signaler (WSAECONNRESET on Windows).
         self.stop_state_stream()
+        self.stop_viewer_stream()
         self.stop_camera_streams()
         with self._sock_lock:
             if self._socket is not None:

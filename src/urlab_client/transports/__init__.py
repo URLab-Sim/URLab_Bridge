@@ -191,6 +191,29 @@ class Transport(ABC):
         fast-path renderers on topic ``geoms``. No-op until the PUB is bound."""
         return None
 
+    # -- viewer bus consumer (a viewer subscribes to an owner) ------------
+    # The read-side symmetric to publish_viewer_state: a peek/viewer subscribes
+    # to an owner's {t,qpos,qvel} stream. Transport-agnostic -- ZMQ subscribes the
+    # "viewer" PUB, gRPC opens a subscribe_viewer stream, etc. Base raises so an
+    # unsupported transport fails loudly rather than silently rendering nothing.
+
+    def start_viewer_stream(
+        self,
+        on_frame: SnapshotCallback,
+        *,
+        endpoint: Optional[str] = None,
+    ) -> None:
+        """Subscribe to an owner's viewer bus. ``on_frame`` receives each decoded
+        ``{t, qpos, qvel}`` mapping on a worker thread. ``endpoint`` is the owner's
+        viewer PUB (``tcp://host:port``) for transports that dial a separate address
+        (ZMQ); transports that stream over their own channel (gRPC) ignore it.
+        Idempotent."""
+        raise NotImplementedError(f"{type(self).__name__} has no viewer stream")
+
+    def stop_viewer_stream(self) -> None:
+        """Tear down the viewer stream. Idempotent."""
+        return None
+
 
 def make_transport(
     name: str,
