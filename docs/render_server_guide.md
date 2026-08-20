@@ -153,6 +153,47 @@ Rules:
 - Speedup is real on multiple GPUs / uncapped hardware (the orchestrator's target);
   on a single shared GPU it helps partially (the GPU is the shared bottleneck).
 
+## 7. Peeking at a live sim (smooth, async, interactive)
+
+Sometimes you just want to *watch* a running sim — and maybe reach in and push
+things — without disturbing the eval render pool. That's a **peek**: a smooth,
+async view fed by a separate channel.
+
+The key idea: an **owner** (a Python client *or* a UE instance — whoever steps the
+physics) broadcasts raw kinematics on a **`viewer` bus** (`{t, qpos, qvel}`) and
+accepts `fastpath_perturb` on a control channel. Any number of **read-only or
+interactive viewers** subscribe and render it themselves. This is a *different
+channel* from the forced eval pool, so peeking never stalls it — which also
+answers the "delay vs no-delay" question: the pool is no-delay/forced (crisp
+eval); the peek is the smooth async bus (latest state, a few frames behind).
+
+**Owner side** — a Python owner broadcasts + accepts pushes each step:
+```python
+from urlab_client.fastpath_owner import FastPathOwner
+owner = FastPathOwner(mjb_bytes, scene="demo", bus_port=5561, control_port=5571)
+while running:
+    data.xfrc_applied[:] = 0
+    for body, wrench in owner.drain_perturbations().items():   # pushes from viewers
+        data.xfrc_applied[body] = wrench
+    mujoco.mj_step(model, data)
+    owner.serve_pending()                                      # answer hello/perturb
+    owner.publish_state(data.time, data.qpos, data.qvel)      # feed viewers
+```
+(A UE Direct instance is the other kind of owner — launch it with
+`-URLabBroadcastViewers=1`; a peek viewer attaches to either identically.)
+
+**Peek side** — attach a mujoco window to that bus; ctrl-drag pushes back:
+```
+python -m urlab_client.peek --model scene.xml \
+    --bus tcp://127.0.0.1:5561 --control tcp://127.0.0.1:5571   # omit --control = read-only
+```
+Or in code: `PeekViewer(model, bus=..., control=...).run()`. The push force is
+MuJoCo's own (`mjv_applyPerturbForce`), so a grab in the peek shows up in every
+viewer's view. A UE VR instance is the photoreal/walk-around version of the same
+peek (same bus, same perturb) — display wiring on the UE side.
+
+Runnable demo: `examples/owner_peek_demo.py` (prints the exact `peek` command).
+
 ## TL;DR for a downstream agent
 
 1. Boot the server with `-URLabFastServe -URLabFastForcedOnly -URLabFastCameras`.

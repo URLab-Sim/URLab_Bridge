@@ -297,6 +297,27 @@ class FastPathOwner:
             {"f": int(frame), "xpos": list(xpos), "xquat": list(xquat)}, cxpos, cxquat
         )
 
+    def publish_state(self, t: float, qpos, qvel) -> None:
+        """Broadcast raw kinematics ``{t, qpos, qvel}`` on the ``viewer`` topic for
+        read-only viewers -- a mujoco/pystudio peek window or a UE viewer instance.
+
+        This is the smooth async channel, separate from the eval render path, and
+        uses the exact wire format UE's ViewerSubscribeTransport consumes, so the
+        same bus feeds a Python peek and a UE viewer alike. Best-effort: a slow or
+        absent subscriber never stalls the sim."""
+        payload = {
+            "t": float(t),
+            "qpos": [float(x) for x in qpos],
+            "qvel": [float(x) for x in qvel],
+        }
+        try:
+            self._pub.send_multipart(
+                [b"viewer", msgpack.packb(payload, use_bin_type=True)],
+                flags=zmq.NOBLOCK,
+            )
+        except zmq.ZMQError:
+            pass
+
     # -- lifecycle ---------------------------------------------------------- #
     def close(self) -> None:
         try:

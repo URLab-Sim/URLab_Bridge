@@ -84,6 +84,7 @@ from .render_pool import (
     RenderPoolError,
     parse_endpoints,
 )
+from .peek import PeekViewer
 from .enums import (
     ActuatorType,
     CameraMode,
@@ -160,6 +161,8 @@ __all__ = [
     "InstanceSpec",
     "RenderPoolError",
     "parse_endpoints",
+    # live peek viewer (attach + push)
+    "PeekViewer",
     "URLabArticulation",
     "URLabCameraView",
     "URLabController",
