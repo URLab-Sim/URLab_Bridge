@@ -21,10 +21,20 @@ just ZMQ. It speaks the exact same envelope as the UE bridge: a ``UrlabPacket``
 (``op``, ``payload`` msgpack, ``sequence_id``) inside ``EnvironmentRequest/
 Response.extension``.
 
-Ops served: ``fastpath_hello`` (scene/ngeom), ``fastpath_perturb`` (into the
-owner's perturb queue), and ``subscribe_viewer`` (a server-stream of
-``{t,qpos,qvel}`` frames from the owner's latest state). Started via
-``FastPathOwner.start_grpc_server()``.
+Ops served (peek/viewer/VR are capability *consumers*, not modes):
+- ``fastpath_hello`` -- scene/ngeom, the advertised capabilities, and the model
+  bytes + format (``xml``/``mjz``/``mjb``; xml/mjz are decoded in-engine, so a
+  mirror needs no MJB version match).
+- ``subscribe`` -- gated on the ``stream_cameras`` capability; a server-stream of
+  the owner's view. ``format`` selects the payload: ``transforms`` (the true
+  mirror -- per-body ``bxpos``/``bxquat``, consumer runs zero MuJoCo; op
+  ``view_frame``) or ``qpos`` (``{t,qpos,qvel}``; op ``viewer_frame``).
+  ``subscribe_viewer`` is the back-compat alias for ``format=qpos``.
+- ``fastpath_perturb`` -- gated on the ``accept_input`` capability; into the
+  owner's perturb queue.
+
+Started via ``FastPathOwner.start_grpc_server()``. The same contract is served by
+a UE owner, so a viewer is owner-agnostic.
 """
 from __future__ import annotations
 
@@ -45,6 +55,16 @@ def _pb():
     return dm_env_rpc_pb2, dm_env_rpc_pb2_grpc, urlab_dm_env_rpc_pb2
 
 
+def _req_format(payload: bytes) -> str:
+    """Read the requested view format from a subscribe payload. Defaults to
+    'transforms' (the true mirror payload) -- 'qpos' only if explicitly asked."""
+    try:
+        req = msgpack.unpackb(bytes(payload), raw=False, strict_map_key=False) or {}
+        return "qpos" if str(req.get("format", "")).lower() == "qpos" else "transforms"
+    except Exception:  # noqa: BLE001
+        return "transforms"
+
+
 class _OwnerServicer:
     """dm_env EnvironmentServicer (duck-typed -- add_EnvironmentServicer_to_server
     only reads ``.Process``, so no base class import is needed)."""
@@ -62,10 +82,23 @@ class _OwnerServicer:
             if not env_req.extension.Unpack(pkt):
                 continue
             op = pkt.op
-            if op == "subscribe_viewer":
+            if op in ("subscribe", "subscribe_viewer"):
+                # Subscribing to the owner's view is gated on the stream_cameras
+                # capability (peek/viewer/VR are consumers of that cap, not modes).
+                if not self._owner.streams_view:
+                    yield self._wrap(op, pkt.sequence_id, msgpack.packb(
+                        {"ok": False, "error": "capability disabled: stream_cameras"},
+                        use_bin_type=True))
+                    return
+                # Format: "transforms" (true mirror -- bxpos/bxquat, viewer runs no
+                # MuJoCo) or "qpos" ({t,qpos,qvel}). subscribe_viewer == qpos.
+                fmt = "qpos" if op == "subscribe_viewer" else _req_format(pkt.payload)
                 # This stream is dedicated to the subscription; stream frames until
                 # the client goes away, then end (don't read further requests).
-                yield from self._stream_viewer(context, pkt.sequence_id)
+                if fmt == "transforms":
+                    yield from self._stream_transforms(context, pkt.sequence_id)
+                else:
+                    yield from self._stream_viewer(context, pkt.sequence_id)
                 return
             reply = self._dispatch(op, bytes(pkt.payload))
             yield self._wrap(op, pkt.sequence_id, reply)
@@ -78,21 +111,26 @@ class _OwnerServicer:
         if op == "fastpath_perturb":
             if not self._owner.accepts_input:
                 return msgpack.packb(
-                    {"ok": False, "error": "capability disabled: AcceptInput"},
+                    {"ok": False, "error": "capability disabled: accept_input"},
                     use_bin_type=True)
             self._owner.submit_perturb(
                 req.get("body", -1), req.get("force", (0, 0, 0)),
                 req.get("torque", (0, 0, 0)))
             return msgpack.packb({"ok": True}, use_bin_type=True)
         if op == "fastpath_hello":
+            # Serve the model so a mirror can build geometry: bytes + format
+            # ("xml"/"mjz"/"mjb"; xml/mjz are decoded in-engine, no MJB version
+            # match needed), plus the advertised capabilities the consumer negotiates.
             return msgpack.packb(
                 {"ok": True, "scene": self._owner.scene, "ngeom": self._owner.ngeom,
-                 "capabilities": list(self._owner.capabilities)},
+                 "capabilities": list(self._owner.capabilities),
+                 "model": self._owner.model_bytes, "format": self._owner.model_format},
                 use_bin_type=True)
         return msgpack.packb(
             {"ok": False, "error": f"unknown op {op!r}"}, use_bin_type=True)
 
     def _stream_viewer(self, context, seq: int):
+        # qpos view (format=qpos / subscribe_viewer): consumer runs its own FK.
         last_t = None
         while context.is_active():
             st = self._owner.latest_state()
@@ -102,6 +140,19 @@ class _OwnerServicer:
                 payload = msgpack.packb(
                     {"t": t, "qpos": qpos, "qvel": qvel}, use_bin_type=True)
                 yield self._wrap("viewer_frame", seq, payload)
+            time.sleep(self._stream_poll_s)
+
+    def _stream_transforms(self, context, seq: int):
+        # Transform view (format=transforms): the true mirror payload -- per-body
+        # bxpos/bxquat (+ optional camera transforms). The viewer applies them
+        # directly and runs zero MuJoCo. Same frames a ZMQ 'geoms' subscriber gets.
+        last_f = None
+        while context.is_active():
+            fr = self._owner.latest_transforms()
+            if fr is not None and fr.get("f") != last_f:
+                last_f = fr.get("f")
+                yield self._wrap("view_frame", seq,
+                                 msgpack.packb(fr, use_bin_type=True))
             time.sleep(self._stream_poll_s)
 
     def _wrap(self, op: str, seq: int, payload: bytes):

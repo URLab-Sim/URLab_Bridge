@@ -152,6 +152,63 @@ def test_grpc_owner_stream_and_perturb(tmp_path):
         owner.close()
 
 
+def test_grpc_owner_transform_stream_and_hello(tmp_path):
+    """Owner gRPC server, mirror path: subscribe(format=transforms) streams the
+    per-body bxpos/bxquat payload under stream_cameras, fastpath_hello returns the
+    model bytes + format, and a no-stream_cameras owner refuses the subscribe."""
+    import grpc
+
+    from urlab_client.fastpath_owner import FastPathOwner
+    from urlab_client.transports._dmenv import (
+        dm_env_rpc_pb2, dm_env_rpc_pb2_grpc, urlab_dm_env_rpc_pb2 as upb,
+    )
+
+    def sub_pkt(op, req):
+        p = upb.UrlabPacket(op=op, payload=msgpack.packb(req, use_bin_type=True),
+                            sequence_id=1)
+        e = dm_env_rpc_pb2.EnvironmentRequest(); e.extension.Pack(p)
+        return e
+
+    def unwrap(resp):
+        o = upb.UrlabPacket(); resp.extension.Unpack(o)
+        return o.op, msgpack.unpackb(bytes(o.payload), raw=False, strict_map_key=False)
+
+    port = _free_port()
+    owner = FastPathOwner(
+        b"MODELBYTES", scene="t", model_format="xml",
+        control_port=_free_port(), bus_port=_free_port(),
+        advertise_host="127.0.0.1", registry_dir=str(tmp_path))
+    owner.start_grpc_server(port=port)
+    stub = dm_env_rpc_pb2_grpc.EnvironmentStub(grpc.insecure_channel(f"127.0.0.1:{port}"))
+    try:
+        for r in stub.Process(iter([sub_pkt("fastpath_hello", {})])):
+            _, hello = unwrap(r); break
+        assert hello["format"] == "xml" and hello["model"] == b"MODELBYTES"
+        assert "stream_cameras" in hello["capabilities"]
+
+        owner.publish_bodies(7, bxpos=[1.0, 2.0, 3.0], bxquat=[1.0, 0.0, 0.0, 0.0])
+        for r in stub.Process(iter([sub_pkt("subscribe", {"format": "transforms"})])):
+            op, fr = unwrap(r); break
+        assert op == "view_frame"
+        assert list(fr["bxpos"]) == [1.0, 2.0, 3.0] and fr["f"] == 7
+    finally:
+        owner.close()
+
+    port2 = _free_port()
+    ro = FastPathOwner(
+        b"", scene="ro", control_port=_free_port(), bus_port=_free_port(),
+        advertise_host="127.0.0.1", registry_dir=str(tmp_path),
+        capabilities=("accept_input",))  # no stream_cameras
+    ro.start_grpc_server(port=port2)
+    stub2 = dm_env_rpc_pb2_grpc.EnvironmentStub(grpc.insecure_channel(f"127.0.0.1:{port2}"))
+    try:
+        for r in stub2.Process(iter([sub_pkt("subscribe", {"format": "transforms"})])):
+            _, reply = unwrap(r); break
+        assert reply["ok"] is False and "stream_cameras" in reply["error"]
+    finally:
+        ro.close()
+
+
 def test_readonly_owner_refuses_perturb(tmp_path):
     """An owner without the AcceptInput capability refuses fastpath_perturb."""
     from urlab_client.fastpath_owner import FastPathOwner
@@ -163,7 +220,7 @@ def test_readonly_owner_refuses_perturb(tmp_path):
     )
     try:
         assert owner.accepts_input is False
-        assert "AcceptInput" not in owner.capabilities and "view" in owner.capabilities
+        assert "accept_input" not in owner.capabilities and "stream_cameras" in owner.capabilities
         req = zmq.Context.instance().socket(zmq.REQ)
         req.setsockopt(zmq.RCVTIMEO, 500)
         req.setsockopt(zmq.SNDTIMEO, 500)
@@ -180,7 +237,7 @@ def test_readonly_owner_refuses_perturb(tmp_path):
                 time.sleep(0.01)
         req.close(0)
         assert rep is not None and rep.get("ok") is False
-        assert "AcceptInput" in rep.get("error", "")
+        assert "accept_input" in rep.get("error", "")
         assert owner.drain_perturbations() == {}  # nothing accumulated
     finally:
         owner.close()

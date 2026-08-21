@@ -38,6 +38,27 @@ from .pool import default_registry_dir
 # on it so it lists owners a renderer can actually consume.
 FASTPATH_OWNER_CAP = "fastpath_owner"
 
+# Canonical capability wire strings -- one vocabulary shared with UE, whose
+# EMjCapability advertises exactly these (RpcDispatcher.cpp: "stream_cameras" /
+# "accept_input"). Peek/viewer/VR are NOT modes: a consumer uses stream_cameras
+# to observe the owner's view and accept_input to push perturbations back.
+CAP_STREAM_CAMERAS = "stream_cameras"
+CAP_ACCEPT_INPUT = "accept_input"
+# Fold legacy / enum-style spellings onto the canonical wire strings so older
+# callers (and the UE enum names) keep working.
+_CAP_ALIASES = {
+    "view": CAP_STREAM_CAMERAS,
+    "streamcameras": CAP_STREAM_CAMERAS,
+    "stream_cameras": CAP_STREAM_CAMERAS,
+    "acceptinput": CAP_ACCEPT_INPUT,
+    "accept_input": CAP_ACCEPT_INPUT,
+}
+
+
+def _canon_cap(c: str) -> str:
+    """Map a capability spelling to its canonical wire string (UE vocabulary)."""
+    return _CAP_ALIASES.get(str(c).strip().lower(), str(c))
+
 
 def _vec3(v) -> list[float]:
     """Coerce an arbitrary wire value into exactly three floats, padding a short
@@ -81,17 +102,23 @@ class FastPathOwner:
         bind: str = "0.0.0.0",
         advertise_host: Optional[str] = None,
         ngeom: int = 0,
+        model_format: str = "mjb",
         instance_id: Optional[str] = None,
         registry_dir: Optional[str] = None,
-        capabilities: Sequence[str] = ("view", "AcceptInput"),
+        capabilities: Sequence[str] = (CAP_STREAM_CAMERAS, CAP_ACCEPT_INPUT),
     ) -> None:
         self._mjb = bytes(mjb_bytes)
+        # Wire format of the model bytes served on fastpath_hello: "mjb" (compiled,
+        # version-locked) or "xml"/"mjz" (source the renderer decodes in-engine, so
+        # no MJB version match is required).
+        self._model_format = str(model_format)
         self._scene = scene
         self._ngeom = int(ngeom)
-        # Granted capabilities advertised in the registry. "view" = read-only peek
-        # is allowed; "AcceptInput" = interactive viewers may push perturbations.
-        # Drop "AcceptInput" for a look-but-don't-touch owner.
-        self._caps = {FASTPATH_OWNER_CAP} | {str(c) for c in capabilities}
+        # Granted capabilities advertised in the registry (canonical UE wire
+        # strings). "stream_cameras" = a consumer may subscribe to this owner's
+        # view; "accept_input" = interactive consumers may push perturbations.
+        # Drop "accept_input" for a look-but-don't-touch owner.
+        self._caps = {FASTPATH_OWNER_CAP} | {_canon_cap(c) for c in capabilities}
         self._host = advertise_host or socket.gethostname()
         self._control_port = int(control_port)
         self._bus_port = int(bus_port)
@@ -128,6 +155,10 @@ class FastPathOwner:
         self._lock = threading.Lock()
         self._perturb: "dict[int, list[float]]" = {}
         self._latest_state: "Optional[tuple[float, list, list]]" = None
+        # Latest per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?}) cached
+        # for a gRPC subscribe(format=transforms) stream -- the true mirror payload
+        # (viewer runs zero MuJoCo). Written by every publish_bodies/publish_mjdata.
+        self._latest_transforms: "Optional[dict]" = None
         self._grpc_server = None  # optional; started by start_grpc_server()
         self._grpc_endpoint: Optional[str] = None
         self._write_registry()
@@ -149,8 +180,23 @@ class FastPathOwner:
 
     @property
     def accepts_input(self) -> bool:
-        """Whether interactive viewers may push perturbations (the AcceptInput cap)."""
-        return "AcceptInput" in self._caps
+        """Whether interactive consumers may push perturbations (accept_input cap)."""
+        return CAP_ACCEPT_INPUT in self._caps
+
+    @property
+    def streams_view(self) -> bool:
+        """Whether consumers may subscribe to this owner's view (stream_cameras cap)."""
+        return CAP_STREAM_CAMERAS in self._caps
+
+    @property
+    def model_bytes(self) -> bytes:
+        """The model served on fastpath_hello (see :attr:`model_format`)."""
+        return self._mjb
+
+    @property
+    def model_format(self) -> str:
+        """Wire format of :attr:`model_bytes`: 'mjb' | 'xml' | 'mjz'."""
+        return self._model_format
 
     @property
     def scene(self) -> str:
@@ -243,7 +289,7 @@ class FastPathOwner:
             # HandleFastpathPerturb capability check).
             if not self.accepts_input:
                 return msgpack.packb(
-                    {"ok": False, "error": "capability disabled: AcceptInput"},
+                    {"ok": False, "error": "capability disabled: accept_input"},
                     use_bin_type=True)
             # Accumulate it; the owner applies it to xfrc_applied on its next step.
             # Force/torque are normalized to length 3 (padding short vectors) BEFORE
@@ -284,9 +330,16 @@ class FastPathOwner:
 
     def latest_state(self) -> "Optional[tuple[float, list, list]]":
         """The most recent ``(t, qpos, qvel)`` given to :meth:`publish_state`, or
-        None. Read by an optional gRPC subscribe stream; thread-safe."""
+        None. Read by a gRPC subscribe(format=qpos) stream; thread-safe."""
         with self._lock:
             return self._latest_state
+
+    def latest_transforms(self) -> "Optional[dict]":
+        """The most recent per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?})
+        published via :meth:`publish_bodies`/:meth:`publish_mjdata`, or None. Read by
+        a gRPC subscribe(format=transforms) stream; thread-safe (returns a copy)."""
+        with self._lock:
+            return dict(self._latest_transforms) if self._latest_transforms else None
 
     # -- transform bus ------------------------------------------------------ #
     def _send_transforms(self, payload: dict, cxpos, cxquat, usercam=None) -> None:
@@ -305,6 +358,11 @@ class FastPathOwner:
             payload["ucpos"] = [float(v) for v in pos]
             payload["ucfwd"] = [float(v) for v in fwd]
             payload["ucup"] = [float(v) for v in up]
+        # Cache the fully-assembled frame for a gRPC subscribe(format=transforms)
+        # stream, so a gRPC mirror gets byte-identical frames to a ZMQ mirror. The
+        # ZMQ publish below stays independent + best-effort.
+        with self._lock:
+            self._latest_transforms = dict(payload)
         try:
             self._pub.send_multipart(
                 [b"geoms", msgpack.packb(payload, use_bin_type=True)],
