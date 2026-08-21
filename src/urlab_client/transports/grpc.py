@@ -324,7 +324,11 @@ class GrpcTransport(Transport):
             import grpc  # type: ignore
         except ImportError:  # pragma: no cover
             return
-        from ._dmenv import dm_env_rpc_pb2, dm_env_rpc_pb2_grpc, urlab_dm_env_rpc_pb2
+        # Use the module-level protobuf modules (dm_env_rpc.v1 with a bundled
+        # ._dmenv fallback, resolved once at import); bail cleanly if neither
+        # path resolved rather than raising on a None attribute mid-stream.
+        if dm_env_rpc_pb2 is None or dm_env_rpc_pb2_grpc is None or urlab_dm_env_rpc_pb2 is None:
+            return
 
         backoff = 0.25
         while not stop.is_set():
