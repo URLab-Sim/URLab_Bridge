@@ -91,13 +91,37 @@ class CameraFrame:
         return np.ascontiguousarray(self.to_array()[:, :, 2::-1])
 
 
-def poses_from_mjdata(model, data) -> Dict[str, np.ndarray]:
+def _refresh_render_kinematics(model, data) -> None:
+    """Re-evaluates forward kinematics (body/camera/geom/site/light transforms)
+    after mj_step so derived arrays (xpos, xquat, cam_xpos, cam_xmat, etc.)
+    reflect post-integration qpos before being read for rendering."""
+    import mujoco  # lazy
+
+    mujoco.mj_kinematics(model, data)
+    mujoco.mj_comPos(model, data)
+    mujoco.mj_camlight(model, data)
+
+
+def poses_from_mjdata(
+    model,
+    data,
+    *,
+    sync_geoms: bool = False,
+    refresh_kinematics: bool = True,
+) -> Dict[str, np.ndarray]:
     """Body + camera world transforms from a mujoco ``MjData``, ready for ``render()``.
 
     Returns ``bxpos``/``bxquat`` (per-body) and ``cxpos``/``cxquat`` (per-camera), the
     exact fields the server applies to its mirror before rendering.
+    If ``refresh_kinematics`` is True (default), re-runs the position pipeline
+    (mj_kinematics -> mj_comPos -> mj_camlight) so derived transforms reflect
+    post-integration qpos.
+    If ``sync_geoms`` is True, includes ``geom_pos`` and ``geom_quat`` model offsets.
     """
     import mujoco  # lazy: the client core does not require mujoco
+
+    if refresh_kinematics:
+        _refresh_render_kinematics(model, data)
 
     ncam = int(model.ncam)
     cxmat = np.asarray(data.cam_xmat, np.float64).reshape(ncam, 9)
@@ -106,12 +130,16 @@ def poses_from_mjdata(model, data) -> Dict[str, np.ndarray]:
     for c in range(ncam):
         mujoco.mju_mat2Quat(q, cxmat[c])
         cxquat[4 * c:4 * c + 4] = q
-    return {
+    res = {
         "bxpos": np.asarray(data.xpos, np.float64).reshape(-1),
         "bxquat": np.asarray(data.xquat, np.float64).reshape(-1),
         "cxpos": np.asarray(data.cam_xpos, np.float64).reshape(-1),
         "cxquat": cxquat,
     }
+    if sync_geoms:
+        res["geom_pos"] = np.asarray(model.geom_pos, np.float64).reshape(-1)
+        res["geom_quat"] = np.asarray(model.geom_quat, np.float64).reshape(-1)
+    return res
 
 
 class RenderClient:
@@ -273,7 +301,6 @@ class RenderClient:
         """
         self.load_model(mjz, format="mjz", assets=assets, timeout_ms=timeout_ms)
 
-    # -- rendering ---------------------------------------------------------
     def render(
         self,
         *,
@@ -281,16 +308,20 @@ class RenderClient:
         bxquat: Sequence[float],
         cxpos: Optional[Sequence[float]] = None,
         cxquat: Optional[Sequence[float]] = None,
+        geom_pos: Optional[Sequence[float]] = None,
+        geom_quat: Optional[Sequence[float]] = None,
+        gxpos: Optional[Sequence[float]] = None,
+        gxquat: Optional[Sequence[float]] = None,
         sim_time: float = 0.0,
         cameras: Optional[Sequence[str]] = None,
         user_pose: Optional[UserPose] = None,
-        delay: int = 0,
+        delay: float = 0.0,
         timeout_ms: int = 2000,
     ) -> Dict[str, CameraFrame]:
         """Push a pose set and return ``{camera_name: CameraFrame}``.
 
         ``cameras`` selects which cameras to render (None = all; naming one is far
-        cheaper -- each camera is a full scene capture). ``delay`` in substeps: 0 =
+        cheaper -- each camera is a full scene capture). ``delay`` in seconds: 0 =
         fresh/blocking, >0 = stale-from-ring (faster, real-camera-latency emulation).
 
         ``user_pose`` drives the render server's free/user camera -- a ``(pos, fwd,
@@ -305,6 +336,14 @@ class RenderClient:
             "bxpos": _tolist(bxpos), "bxquat": _tolist(bxquat),
             "timeout_ms": int(timeout_ms),
         }
+        if geom_pos is not None:
+            req["geom_pos"] = _tolist(geom_pos)
+        if geom_quat is not None:
+            req["geom_quat"] = _tolist(geom_quat)
+        if gxpos is not None:
+            req["gxpos"] = _tolist(gxpos)
+        if gxquat is not None:
+            req["gxquat"] = _tolist(gxquat)
         if cxpos is not None:
             req["cxpos"] = _tolist(cxpos)
         if cxquat is not None:
@@ -317,15 +356,21 @@ class RenderClient:
         if cameras:
             req["cameras"] = list(cameras)
         if delay:
-            req["delay"] = int(delay)
+            req["delay"] = float(delay)
         rep = self._t.rpc(req, recv_timeout_ms=timeout_ms + 5000)
         _check(rep, "fastpath_render")
         self._frame += 1
         return {c["name"]: _frame_from(c) for c in rep.get("cameras", [])}
 
     def render_mjdata(
-        self, model, data, *, cameras: Optional[Sequence[str]] = None,
-        user_pose: Optional[UserPose] = None, delay: int = 0,
+        self,
+        model,
+        data,
+        *,
+        cameras: Optional[Sequence[str]] = None,
+        user_pose: Optional[UserPose] = None,
+        delay: float = 0.0,
+        sync_geoms: bool = False,
         timeout_ms: int = 2000,
     ) -> Dict[str, CameraFrame]:
         """Convenience: render straight from a mujoco ``(model, data)`` pair.
@@ -334,7 +379,8 @@ class RenderClient:
         :data:`USER_CAMERA` to ``cameras`` to receive its frame."""
         return self.render(
             sim_time=float(data.time), cameras=cameras, user_pose=user_pose,
-            delay=delay, timeout_ms=timeout_ms, **poses_from_mjdata(model, data),
+            delay=float(delay), timeout_ms=timeout_ms,
+            **poses_from_mjdata(model, data, sync_geoms=sync_geoms),
         )
 
     def camera_names(self) -> List[str]:

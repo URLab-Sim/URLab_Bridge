@@ -274,6 +274,18 @@ class FastPathOwner:
             cxpos, cxquat, usercam,
         )
 
+    def publish_mjdata(self, frame: int, model, data, usercam=None,
+                       refresh_kinematics: bool = True) -> None:
+        """Publish transforms straight from an MjModel/MjData pair, re-running FK
+        after stepping so transforms reflect post-integration qpos."""
+        from .render_client import poses_from_mjdata  # lazy import
+
+        poses = poses_from_mjdata(model, data, refresh_kinematics=refresh_kinematics)
+        self.publish_bodies(
+            frame, poses["bxpos"], poses["bxquat"],
+            cxpos=poses["cxpos"], cxquat=poses["cxquat"], usercam=usercam,
+        )
+
     def publish_geoms(self, frame: int, xpos, xquat, cxpos=None, cxquat=None) -> None:
         """Publish one per-geom transform frame on the ``geoms`` topic.
 

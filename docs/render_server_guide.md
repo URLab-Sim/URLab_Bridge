@@ -24,7 +24,7 @@ Full flag reference: `UnrealRoboticsLab/docs/render_server_flags.md`.
 
 ```python
 import mujoco
-from urlab_client import RenderClient, USER_CAMERA, viewer_sync
+from urlab_bridge.urlab_client import RenderClient, USER_CAMERA, viewer_sync
 
 model = mujoco.MjModel.from_xml_path("scene.xml")
 data = mujoco.MjData(model)

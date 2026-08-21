@@ -75,7 +75,7 @@ only for comparable perf benchmarks.
 
 ```python
 import mujoco
-from urlab_client import RenderClient
+from urlab_bridge.urlab_client import RenderClient
 
 model = mujoco.MjModel.from_xml_path("scene.xml")   # same model the server loaded
 data = mujoco.MjData(model)

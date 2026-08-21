@@ -60,6 +60,23 @@ try:  # pragma: no cover - trivial import guard
 except ImportError:  # pragma: no cover
     msgpack = None  # noqa: N816
 
+dm_env_rpc_pb2 = None
+dm_env_rpc_pb2_grpc = None
+urlab_dm_env_rpc_pb2 = None
+_import_error: Optional[str] = None
+
+try:
+    from dm_env_rpc.v1 import dm_env_rpc_pb2, dm_env_rpc_pb2_grpc  # type: ignore
+    from ._dmenv import urlab_dm_env_rpc_pb2  # type: ignore
+except Exception:
+    try:
+        from ._dmenv import dm_env_rpc_pb2, dm_env_rpc_pb2_grpc, urlab_dm_env_rpc_pb2  # type: ignore
+    except Exception as _e:
+        _import_error = str(_e)
+        dm_env_rpc_pb2 = None
+        dm_env_rpc_pb2_grpc = None
+        urlab_dm_env_rpc_pb2 = None
+
 # Default gRPC port the UE dm_env_rpc backend listens on (ListenPort).
 DEFAULT_DMENV_PORT = 50051
 
@@ -111,7 +128,6 @@ class GrpcTransport(Transport):
             raise RuntimeError(
                 "grpcio not installed; cannot use transport='grpc'"
             ) from exc
-        from ._dmenv import dm_env_rpc_pb2_grpc  # lazy: only when grpc is used
 
         # -1 == unlimited, matching the server's SetMax*MessageSize(-1); camera
         # frames (BGRA8 at 1280x720+) exceed the 4 MB gRPC default. Keepalive keeps
@@ -167,7 +183,10 @@ class GrpcTransport(Transport):
     ) -> Mapping[str, Any]:
         if msgpack is None:
             raise RuntimeError("msgpack not installed; cannot run RPC")
-        from ._dmenv import dm_env_rpc_pb2, urlab_dm_env_rpc_pb2
+        if dm_env_rpc_pb2 is None or urlab_dm_env_rpc_pb2 is None:
+            raise RuntimeError(
+                f"dm_env_rpc protobuf modules not available; cannot run gRPC RPC ({_import_error})"
+            )
 
         payload = msgpack.packb(dict(request), use_bin_type=True)
         timeout_ms = (
@@ -183,10 +202,7 @@ class GrpcTransport(Transport):
         for _attempt in range(2):
             with self._lock:
                 try:
-                    return self._rpc_locked(
-                        op, bytes(payload), timeout_ms,
-                        dm_env_rpc_pb2, urlab_dm_env_rpc_pb2,
-                    )
+                    return self._rpc_locked(op, bytes(payload), timeout_ms)
                 except URLabTimeoutError:
                     self._reset_stream()
                     raise
@@ -200,7 +216,7 @@ class GrpcTransport(Transport):
         ) from conn_err
 
     def _rpc_locked(
-        self, op, payload, timeout_ms, dm_env_rpc_pb2, urlab_dm_env_rpc_pb2
+        self, op: str, payload: bytes, timeout_ms: int
     ) -> Mapping[str, Any]:
         # Caller holds self._lock.
         self._ensure_stream()
