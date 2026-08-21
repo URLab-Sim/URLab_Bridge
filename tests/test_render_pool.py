@@ -41,8 +41,11 @@ class _FakeClient:
     def render(self, *, cameras, user_pose=None, **kw):
         if self.fail:
             raise RuntimeError(f"boom@{self.host}:{self.port}")
-        self.render_calls.append({"cameras": list(cameras), "user_pose": user_pose})
-        return {c: _FakeFrame(c) for c in cameras}
+        names = list(cameras) if cameras is not None else list(CAMS)
+        call = {"cameras": names, "user_pose": user_pose}
+        call.update(kw)  # delay, geom_pos, geom_quat, bxpos, bxquat, gxpos, gxquat, ...
+        self.render_calls.append(call)
+        return {c: _FakeFrame(c) for c in names}
 
     def close(self):
         pass
@@ -149,3 +152,42 @@ def test_failure_aggregates(fake_clients):
     with pytest.raises(RenderPoolError) as ei:
         pool.render(bxpos=[0.0], bxquat=[1.0, 0, 0, 0], cameras=CAMS)
     assert "h:50052" in ei.value.failures
+
+
+# -- merged-contract forwarding (delay float, geom re-baseline) ------------
+def test_delay_forwarded_as_float(fake_clients):
+    pool = RenderPool([("h", 50051), ("h", 50052)])
+    pool.render(bxpos=[0.0], bxquat=[1.0, 0, 0, 0], cameras=CAMS, delay=0.05)
+    for c in _FakeRenderClient.made:
+        assert c.render_calls[-1]["delay"] == 0.05
+        assert isinstance(c.render_calls[-1]["delay"], float)
+
+
+def test_per_step_render_sends_no_geom_fields(fake_clients):
+    # Bandwidth guard: a normal per-step render must not carry the geom baseline.
+    pool = RenderPool([("h", 50051), ("h", 50052)])
+    pool.render(bxpos=[0.0], bxquat=[1.0, 0, 0, 0], cameras=CAMS)
+    for c in _FakeRenderClient.made:
+        assert c.render_calls[-1]["geom_pos"] is None
+        assert c.render_calls[-1]["geom_quat"] is None
+
+
+class _FakeModel:
+    geom_pos = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]   # 2 geoms x 3
+    geom_quat = [1.0, 0, 0, 0, 1.0, 0, 0, 0]    # 2 geoms x 4
+
+
+def test_reset_rebaselines_every_instance(fake_clients):
+    # 2 cameras across 3 instances: one instance is idle on a normal render, but
+    # reset() must deliver geom_pos/geom_quat to ALL THREE regardless.
+    import numpy as np
+
+    pool = RenderPool([("h", 50051), ("h", 50052), ("h", 50053)])
+    pool.reset(_FakeModel())
+    for c in _FakeRenderClient.made:
+        assert c.render_calls, "every instance must receive a reset render"
+        last = c.render_calls[-1]
+        assert last["geom_pos"] is not None and last["geom_quat"] is not None
+        assert np.asarray(last["geom_pos"]).tolist() == list(_FakeModel.geom_pos)
+        # reset carries the geom baseline only -- no body transforms
+        assert list(last["bxpos"]) == [] and list(last["bxquat"]) == []

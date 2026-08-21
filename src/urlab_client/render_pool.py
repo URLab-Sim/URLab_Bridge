@@ -251,10 +251,14 @@ class RenderPool:
         bxquat: Sequence[float],
         cxpos: Optional[Sequence[float]] = None,
         cxquat: Optional[Sequence[float]] = None,
+        geom_pos: Optional[Sequence[float]] = None,
+        geom_quat: Optional[Sequence[float]] = None,
+        gxpos: Optional[Sequence[float]] = None,
+        gxquat: Optional[Sequence[float]] = None,
         sim_time: float = 0.0,
         cameras: Optional[Sequence[str]] = None,
         user_pose: Optional[UserPose] = None,
-        delay: int = 0,
+        delay: float = 0.0,
         timeout_ms: int = 5000,
     ) -> Dict[str, CameraFrame]:
         """Push one pose set and render ``cameras`` (default: all) split across the
@@ -262,7 +266,13 @@ class RenderPool:
 
         The full per-body / per-camera poses go to every instance (they each apply
         the whole state); only the camera *subset* differs. ``user_pose`` is sent
-        only to the instance that draws :data:`USER_CAMERA` this frame.
+        only to the instance that draws :data:`USER_CAMERA` this frame. ``delay`` is
+        in **seconds** (server-side latency-ring sampling).
+
+        ``geom_pos``/``geom_quat`` (local geom offsets) and ``gxpos``/``gxquat``
+        (world geom transforms) are the reset-time re-baseline fields. They are only
+        forwarded to instances that render a camera this frame, so to guarantee
+        **every** instance is re-baselined (including idle ones) use :meth:`reset`.
         """
         names = list(cameras) if cameras is not None else self.camera_names()
         buckets = self._distribute(names)
@@ -274,6 +284,7 @@ class RenderPool:
             up = user_pose if (user_pose is not None and USER_CAMERA in subset) else None
             return client.render(
                 bxpos=bxpos, bxquat=bxquat, cxpos=cxpos, cxquat=cxquat,
+                geom_pos=geom_pos, geom_quat=geom_quat, gxpos=gxpos, gxquat=gxquat,
                 sim_time=sim_time, cameras=subset, user_pose=up,
                 delay=delay, timeout_ms=timeout_ms,
             )
@@ -286,14 +297,51 @@ class RenderPool:
 
     def render_mjdata(
         self, model, data, *, cameras: Optional[Sequence[str]] = None,
-        user_pose: Optional[UserPose] = None, delay: int = 0,
+        user_pose: Optional[UserPose] = None, delay: float = 0.0,
+        sync_geoms: bool = False,
         timeout_ms: int = 5000,
     ) -> Dict[str, CameraFrame]:
         """Convenience: render across the pool straight from a mujoco
-        ``(model, data)`` pair (poses are computed once and broadcast)."""
+        ``(model, data)`` pair (poses are computed once and broadcast).
+
+        ``sync_geoms`` adds the local geom offsets to the pose set. Note it only
+        reaches instances that render a camera this frame; for a guaranteed
+        all-instance re-baseline on episode reset, call :meth:`reset` instead.
+        """
         return self.render(
             sim_time=float(data.time), cameras=cameras, user_pose=user_pose,
-            delay=delay, timeout_ms=timeout_ms, **poses_from_mjdata(model, data),
+            delay=delay, timeout_ms=timeout_ms,
+            **poses_from_mjdata(model, data, sync_geoms=sync_geoms),
+        )
+
+    # -- reset re-baseline (broadcast to ALL instances) -------------------
+    def reset(self, model, *, timeout_ms: int = 5000) -> None:
+        """Re-baseline every instance's geom offsets from ``model.geom_pos`` /
+        ``model.geom_quat``. Call on episode reset / geom re-randomisation, then
+        resume body-only per-step :meth:`render`.
+
+        Unlike ``render_mjdata(sync_geoms=True)``, this reaches **every** instance
+        (including any not drawing a camera next frame): each applies + persists
+        the new offsets in-engine. The server cannot render zero cameras, so one
+        probe camera is captured per instance and discarded.
+        """
+        import numpy as np  # lazy: only the reset path needs it
+
+        geom_pos = np.asarray(model.geom_pos, np.float64).reshape(-1)
+        geom_quat = np.asarray(model.geom_quat, np.float64).reshape(-1)
+        names = self.camera_names()
+        probe = [names[0]] if names else None  # None -> server renders all (no cameras case)
+
+        # Empty bxpos/bxquat: the server skips body transforms (size mismatch) but
+        # still writes the geom offsets into its model -- the same safe request
+        # shape camera_names() uses.
+        self._fan_out(
+            lambda c, _i: c.render(
+                bxpos=[], bxquat=[],
+                geom_pos=geom_pos, geom_quat=geom_quat,
+                cameras=probe, timeout_ms=timeout_ms,
+            ),
+            "reset",
         )
 
     # -- lifecycle --------------------------------------------------------
