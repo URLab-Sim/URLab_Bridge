@@ -16,3 +16,4 @@ assets/models/**/*.onnx
 # source MJCFs at import_xml time. Generated artifact; regenerated
 # every test run.
 tests/fixtures/*_ue.xml
+MUJOCO_LOG.TXT

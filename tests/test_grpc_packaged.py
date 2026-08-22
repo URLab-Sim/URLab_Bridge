@@ -21,6 +21,30 @@ GRPC_PORT = int(os.environ.get("URLAB_GRPC_PORT", "50051"))
 GOLDEN_XML = Path(__file__).resolve().parent / "fixtures" / "golden_scene.xml"
 
 
+def _render_server_available() -> bool:
+    """True only if a packaged RENDER server (advertising fastpath_render) answers
+    on GRPC_PORT. Skips this integration module otherwise -- e.g. nothing running,
+    or a non-render fast-path OWNER squatting the port (which answers hello but has
+    no render ops), so the suite stays green without the packaged server."""
+    try:
+        c = URLabClient("tcp://127.0.0.1", step_port=GRPC_PORT,
+                        transport="grpc", recv_timeout_ms=1500)
+        try:
+            ops = c._rpc("meta", {}).get("ops", [])
+            names = [op["name"] if isinstance(op, dict) else op for op in ops]
+            return "fastpath_render" in names
+        finally:
+            c.close()
+    except Exception:  # noqa: BLE001 -- unreachable/refused/wrong-server all skip
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _render_server_available(),
+    reason=f"packaged gRPC render server (fastpath_render) not reachable on :{GRPC_PORT}",
+)
+
+
 @pytest.fixture(scope="module")
 def mj_model_data():
     model = mujoco.MjModel.from_xml_path(str(GOLDEN_XML))

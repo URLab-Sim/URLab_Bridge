@@ -113,6 +113,8 @@ def pid_alive(pid: int) -> bool:
         return False
     except PermissionError:  # exists, just not ours to signal
         return True
+    except OverflowError:  # pid too large to be a real pid_t -> not a process
+        return False
     except OSError:
         return False
     return True

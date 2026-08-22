@@ -35,11 +35,12 @@ import argparse
 import glob
 import json
 import os
+import socket
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional, Sequence, Tuple
 
-from .pool import default_registry_dir
+from .pool import default_registry_dir, pid_alive
 
 __all__ = ["OwnerInfo", "discover_owners", "format_table", "OWNER_ROLE"]
 
@@ -134,12 +135,30 @@ def _owner_from_endpoint(ep: str) -> OwnerInfo:
     )
 
 
+def _is_local_host(host: Optional[str]) -> bool:
+    """True if ``host`` names this machine (so a registry pid can be liveness-checked)."""
+    if not host:
+        return True  # no host recorded -> assume it was written locally
+    if host in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+        return True
+    try:
+        return host in (socket.gethostname(), socket.getfqdn())
+    except OSError:
+        return False
+
+
 def discover_owners(
     registry_dir: Optional[str] = None,
     endpoints: Optional[Sequence[str]] = None,
+    include_dead: bool = False,
 ) -> List[OwnerInfo]:
     """Owners from the registry directory plus any explicit ``endpoints``
-    (``["host:port", ...]`` -- assumed gRPC). Registry entries first."""
+    (``["host:port", ...]`` -- assumed gRPC). Registry entries first.
+
+    An owner killed with SIGKILL never runs its ``close()`` and so leaves its
+    registry file behind; by default those dead-pid ghosts are filtered out (and
+    their local files opportunistically pruned) so ``list``/``join`` only show
+    reachable owners. Pass ``include_dead=True`` to keep them (diagnostics)."""
     out: List[OwnerInfo] = []
     rdir = registry_dir or default_registry_dir()
     for path in sorted(glob.glob(os.path.join(rdir, "*.json"))):
@@ -149,8 +168,19 @@ def discover_owners(
         except (OSError, ValueError):
             continue
         owner = _owner_from_entry(data)
-        if owner is not None:
-            out.append(owner)
+        if owner is None:
+            continue
+        # Drop (and prune) entries whose owning process is gone. A pid is only
+        # meaningful on the host that wrote it, so the liveness check applies to
+        # LOCAL owners only; a remote owner's pid is unknowable here, so keep it.
+        if (not include_dead and owner.pid is not None
+                and _is_local_host(owner.host) and not pid_alive(owner.pid)):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        out.append(owner)
     for ep in (endpoints or []):
         ep = ep.strip()
         if ep:
@@ -201,6 +231,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     pl = sub.add_parser("list", help="list discoverable owner sessions")
     _common(pl)
+    pl.add_argument("--all", action="store_true",
+                    help="include dead-pid ghosts (default: hide + prune them)")
 
     pj = sub.add_parser("join", help="join an owner as a viewer or VR")
     _common(pj)
@@ -212,7 +244,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     args = ap.parse_args(argv)
     eps = [e for e in (args.endpoints or "").split(",") if e]
-    owners = discover_owners(args.registry, eps)
+    owners = discover_owners(args.registry, eps, include_dead=getattr(args, "all", False))
 
     if args.cmd == "list":
         print(format_table(owners))
