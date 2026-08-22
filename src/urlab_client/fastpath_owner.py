@@ -103,6 +103,7 @@ class FastPathOwner:
         advertise_host: Optional[str] = None,
         ngeom: int = 0,
         model_format: str = "mjb",
+        assets: "Optional[dict]" = None,
         instance_id: Optional[str] = None,
         registry_dir: Optional[str] = None,
         capabilities: Sequence[str] = (CAP_STREAM_CAMERAS, CAP_ACCEPT_INPUT),
@@ -110,8 +111,12 @@ class FastPathOwner:
         self._mjb = bytes(mjb_bytes)
         # Wire format of the model bytes served on fastpath_hello: "mjb" (compiled,
         # version-locked) or "xml"/"mjz" (source the renderer decodes in-engine, so
-        # no MJB version match is required).
+        # no MJB version match is required). For "xml", model_bytes is the flattened
+        # MJCF and `assets` is {bare-filename: bytes} for its meshes/textures.
         self._model_format = str(model_format)
+        self._assets: "dict[str, bytes]" = {
+            str(k): bytes(v) for k, v in (assets or {}).items()
+        }
         self._scene = scene
         self._ngeom = int(ngeom)
         # Granted capabilities advertised in the registry (canonical UE wire
@@ -147,13 +152,23 @@ class FastPathOwner:
             self._registry_dir, f"fastpath_{self._instance_id}_{self._pid}.json"
         )
         self._last_registry_write = 0.0
-        # Pending external perturbations from renderers/viewers: body id -> 6-vector
-        # (fx,fy,fz,tx,ty,tz) in MuJoCo world frame. Drained by the owner each step.
-        # Guarded by _lock because a gRPC server (optional) submits from its own
-        # threads; the latest published {t,qpos,qvel} is cached here too so a gRPC
-        # subscribe stream can read it.
+        # Latest drag INTENT from a renderer/viewer, not a computed force: a mirror
+        # has no mjData, so it forwards {select, active, localpos, refselpos} (body,
+        # grab point in body-local MuJoCo frame, drag target in world frame) and the
+        # owner runs the real mjv_applyPerturbForce (mass-scaled + critically damped,
+        # exactly like simulate's Ctrl-drag) in apply_perturbations(). Guarded by
+        # _lock because a gRPC server (optional) submits from its own threads; the
+        # latest published {t,qpos,qvel} is cached here too for a gRPC subscribe.
         self._lock = threading.Lock()
-        self._perturb: "dict[int, list[float]]" = {}
+        self._perturb_intent: "Optional[dict]" = None
+        # Raw wrench pushes (legacy/programmatic: apply an EXACT force/torque, e.g. a
+        # Python peek or a test): body id -> accumulated 6-vector. Distinct from the
+        # drag intent -- a raw push is a fixed force, a drag is a spring toward a point.
+        self._perturb_force: "dict[int, list[float]]" = {}
+        # mjv perturb machinery, built lazily on first apply (needs the live model).
+        self._pert = None          # mujoco.MjvPerturb
+        self._pert_scene = None    # throwaway mjvScene (only pert.scale uses it)
+        self._pert_sel = None      # body id localmass was last initialised for
         self._latest_state: "Optional[tuple[float, list, list]]" = None
         # Latest per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?}) cached
         # for a gRPC subscribe(format=transforms) stream -- the true mirror payload
@@ -197,6 +212,16 @@ class FastPathOwner:
     def model_format(self) -> str:
         """Wire format of :attr:`model_bytes`: 'mjb' | 'xml' | 'mjz'."""
         return self._model_format
+
+    @property
+    def grpc_endpoint(self) -> "Optional[str]":
+        """The owner's gRPC endpoint ('host:port') once start_grpc_server() ran, else None."""
+        return self._grpc_endpoint
+
+    @property
+    def assets(self) -> "dict[str, bytes]":
+        """Mesh/texture assets for an xml model ({bare-filename: bytes}); empty for mjb."""
+        return self._assets
 
     @property
     def scene(self) -> str:
@@ -291,14 +316,23 @@ class FastPathOwner:
                 return msgpack.packb(
                     {"ok": False, "error": "capability disabled: accept_input"},
                     use_bin_type=True)
-            # Accumulate it; the owner applies it to xfrc_applied on its next step.
-            # Force/torque are normalized to length 3 (padding short vectors) BEFORE
-            # indexing, so a truncated wire vector can't raise mid-handler and wedge
-            # the REP socket in a received-but-never-replied state.
+            # Two shapes, both applied on the next step (apply_perturbations): an
+            # interactive drag INTENT {select, active, localpos, refselpos} -> the real
+            # mjv spring; or a raw wrench {body, force, torque} -> an exact force.
+            # Vectors are padded to length 3 BEFORE use so a truncated wire vector
+            # can't raise mid-handler and wedge the REP socket.
             try:
-                self.submit_perturb(int(req.get("body", -1)),
-                                    req.get("force", (0, 0, 0)),
-                                    req.get("torque", (0, 0, 0)))
+                if "refselpos" in req or "localpos" in req or "active" in req:
+                    self.submit_perturb(
+                        int(req.get("select", req.get("body", -1))),
+                        bool(req.get("active", True)),
+                        req.get("localpos", (0, 0, 0)),
+                        req.get("refselpos", (0, 0, 0)))
+                else:
+                    self.submit_perturb_force(
+                        int(req.get("body", -1)),
+                        req.get("force", (0, 0, 0)),
+                        req.get("torque", (0, 0, 0)))
                 return msgpack.packb({"ok": True}, use_bin_type=True)
             except (TypeError, ValueError):
                 return msgpack.packb({"error": "bad perturb"}, use_bin_type=True)
@@ -306,27 +340,96 @@ class FastPathOwner:
             {"error": f"unknown op {op!r}"}, use_bin_type=True
         )
 
-    def submit_perturb(self, body: int, force, torque) -> None:
-        """Accumulate a body force/torque (thread-safe; called by the ZMQ REP AND
-        an optional gRPC server). force/torque are padded to length 3 first, so a
-        truncated wire vector can't raise. Ignored for a negative body id."""
+    def submit_perturb(self, select, active, localpos, refselpos) -> None:
+        """Store the latest drag INTENT (thread-safe; called by the ZMQ REP AND an
+        optional gRPC server). ``select`` is the body, ``localpos`` the grab point in
+        the body's local MuJoCo frame, ``refselpos`` the drag target in the world
+        frame (both metres, length-3, padded so a truncated wire vector can't raise).
+        ``active=False`` releases the drag. The owner turns this into a force via
+        :meth:`apply_perturbations` on its next step -- the real mjv spring."""
+        self._perturb_intent = {
+            "select": int(select),
+            "active": bool(active),
+            "localpos": _vec3(localpos),
+            "refselpos": _vec3(refselpos),
+        }
+
+    def submit_perturb_force(self, body: int, force, torque) -> None:
+        """Accumulate an EXACT body force/torque (thread-safe). For programmatic /
+        legacy pushes that want a specific wrench, not a drag spring. Padded to
+        length 3; ignored for a negative body id."""
         body = int(body)
         if body < 0:
             return
         f, t = _vec3(force), _vec3(torque)
         with self._lock:
-            acc = self._perturb.setdefault(body, [0.0] * 6)
+            acc = self._perturb_force.setdefault(body, [0.0] * 6)
             for i in range(3):
                 acc[i] += f[i]
                 acc[i + 3] += t[i]
 
     def drain_perturbations(self) -> "dict[int, list[float]]":
-        """Return the accumulated {body_id: 6-vector} perturbations and clear
-        them. Apply the result to ``data.xfrc_applied`` before the next step."""
+        """Return the accumulated raw {body_id: 6-vector} wrenches and clear them.
+        Apply to ``data.xfrc_applied`` before the next step. (Drag intents go through
+        :meth:`apply_perturbations` instead, which also drains these.)"""
         with self._lock:
-            perts = self._perturb
-            self._perturb = {}
+            perts = self._perturb_force
+            self._perturb_force = {}
         return perts
+
+    def apply_perturbations(self, model, data) -> None:
+        """Write all pending perturbations to ``data.xfrc_applied`` -- call once per
+        step, AFTER zeroing xfrc_applied and BEFORE ``mj_step``. Applies raw wrench
+        pushes AND the interactive drag intent. The drag is exactly what ``simulate``
+        does for a Ctrl-drag: a mass-scaled, critically-damped spring
+        (``mjv_applyPerturbForce``), so the body settles on the target instead of
+        flying off. localmass is (re)computed via ``mjv_initPerturb`` once per grab."""
+        import mujoco  # noqa: PLC0415
+
+        # Raw wrench pushes first (exact forces), then the drag spring on top.
+        for body, wrench in self.drain_perturbations().items():
+            if 0 <= body < model.nbody:
+                data.xfrc_applied[body] = wrench
+
+        with self._lock:
+            intent = self._perturb_intent
+        sel = int(intent["select"]) if intent else -1
+        active = bool(intent["active"]) if intent else False
+
+        if not active or sel <= 0 or sel >= model.nbody:
+            # Released / invalid: clear the last-driven body so it stops drifting.
+            if self._pert_sel is not None and 0 < self._pert_sel < model.nbody:
+                data.xfrc_applied[self._pert_sel] = 0.0
+            self._pert_sel = None
+            return
+
+        # Lazily build the perturb struct + a throwaway scene with a valid frustum
+        # (mjv_initPerturb only touches the scene for pert.scale, which we don't use,
+        # but it faults on a zero frustum).
+        if self._pert is None:
+            self._pert = mujoco.MjvPerturb()
+            self._pert_scene = mujoco.MjvScene(model, 0)
+            for cam in (self._pert_scene.camera[0], self._pert_scene.camera[1]):
+                cam.frustum_near = 0.1
+                cam.frustum_far = 100.0
+                cam.frustum_bottom, cam.frustum_top = -0.1, 0.1
+                cam.frustum_center, cam.frustum_width = 0.0, 0.1
+                cam.pos[:] = [0.0, -2.0, 1.0]
+                cam.forward[:] = [0.0, 1.0, 0.0]
+                cam.up[:] = [0.0, 0.0, 1.0]
+
+        pert = self._pert
+        # New grab: set the anchor + (re)compute localmass for this body/point.
+        if self._pert_sel != sel:
+            pert.select = sel
+            pert.localpos[:] = intent["localpos"]
+            mujoco.mjv_initPerturb(model, data, self._pert_scene, pert)
+            pert.active = int(mujoco.mjtPertBit.mjPERT_TRANSLATE)
+            self._pert_sel = sel
+
+        pert.localpos[:] = intent["localpos"]
+        pert.refselpos[:] = intent["refselpos"]
+        mujoco.mjv_applyPerturbForce(model, data, pert)
 
     def latest_state(self) -> "Optional[tuple[float, list, list]]":
         """The most recent ``(t, qpos, qvel)`` given to :meth:`publish_state`, or

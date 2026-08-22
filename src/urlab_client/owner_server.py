@@ -113,19 +113,44 @@ class _OwnerServicer:
                 return msgpack.packb(
                     {"ok": False, "error": "capability disabled: accept_input"},
                     use_bin_type=True)
-            self._owner.submit_perturb(
-                req.get("body", -1), req.get("force", (0, 0, 0)),
-                req.get("torque", (0, 0, 0)))
+            # Interactive drag intent -> mjv spring; else a raw wrench -> exact force.
+            if "refselpos" in req or "localpos" in req or "active" in req:
+                self._owner.submit_perturb(
+                    req.get("select", req.get("body", -1)),
+                    req.get("active", True),
+                    req.get("localpos", (0, 0, 0)),
+                    req.get("refselpos", (0, 0, 0)))
+            else:
+                self._owner.submit_perturb_force(
+                    req.get("body", -1), req.get("force", (0, 0, 0)),
+                    req.get("torque", (0, 0, 0)))
             return msgpack.packb({"ok": True}, use_bin_type=True)
         if op == "fastpath_hello":
-            # Serve the model so a mirror can build geometry: bytes + format
-            # ("xml"/"mjz"/"mjb"; xml/mjz are decoded in-engine, no MJB version
-            # match needed), plus the advertised capabilities the consumer negotiates.
-            return msgpack.packb(
-                {"ok": True, "scene": self._owner.scene, "ngeom": self._owner.ngeom,
-                 "capabilities": list(self._owner.capabilities),
-                 "model": self._owner.model_bytes, "format": self._owner.model_format},
-                use_bin_type=True)
+            # Serve the model so a mirror can build geometry. Field names match the
+            # UE MjRendererDriverClient::FetchModel reader: `model_format` + `mjb`
+            # (or `xml`+`vfs_assets`), plus a `bus` the mirror subscribes to for the
+            # transform stream -- for a gRPC owner that's grpc://<our gRPC endpoint>.
+            ep = self._owner.grpc_endpoint
+            reply = {
+                "ok": True, "scene": self._owner.scene, "ngeom": self._owner.ngeom,
+                "capabilities": list(self._owner.capabilities),
+                "model_format": self._owner.model_format,
+                "bus": f"grpc://{ep}" if ep else "",
+                # generic aliases (kept for non-UE consumers)
+                "model": self._owner.model_bytes, "format": self._owner.model_format,
+            }
+            if self._owner.model_format == "mjb":
+                reply["mjb"] = self._owner.model_bytes
+            else:
+                # xml/mjz: FetchModel compiles this in-engine (version-independent).
+                # The MJCF text under "xml"; each asset base64 under a "<name>__b64__" key.
+                import base64  # noqa: PLC0415
+                reply["xml"] = self._owner.model_bytes.decode("utf-8", "replace")
+                reply["vfs_assets"] = {
+                    f"{name}__b64__": base64.b64encode(data).decode("ascii")
+                    for name, data in self._owner.assets.items()
+                }
+            return msgpack.packb(reply, use_bin_type=True)
         return msgpack.packb(
             {"ok": False, "error": f"unknown op {op!r}"}, use_bin_type=True)
 
