@@ -125,31 +125,15 @@ class _OwnerServicer:
                     req.get("torque", (0, 0, 0)))
             return msgpack.packb({"ok": True}, use_bin_type=True)
         if op == "fastpath_hello":
-            # Serve the model so a mirror can build geometry. Field names match the
-            # UE MjRendererDriverClient::FetchModel reader: `model_format` + `mjb`
-            # (or `xml`+`vfs_assets`), plus a `bus` the mirror subscribes to for the
-            # transform stream -- for a gRPC owner that's grpc://<our gRPC endpoint>.
+            # Serve the model so a mirror can build geometry. The ONE hello
+            # schema on every transport face (§11) is built by the owner itself
+            # (FastPathOwner.hello_reply), so this gRPC face and the ZMQ REP face
+            # can never diverge; only the bus differs -- for a gRPC owner the
+            # mirror subscribes at grpc://<our gRPC endpoint>.
             ep = self._owner.grpc_endpoint
-            reply = {
-                "ok": True, "scene": self._owner.scene, "ngeom": self._owner.ngeom,
-                "capabilities": list(self._owner.capabilities),
-                "model_format": self._owner.model_format,
-                "bus": f"grpc://{ep}" if ep else "",
-                # generic aliases (kept for non-UE consumers)
-                "model": self._owner.model_bytes, "format": self._owner.model_format,
-            }
-            if self._owner.model_format == "mjb":
-                reply["mjb"] = self._owner.model_bytes
-            else:
-                # xml/mjz: FetchModel compiles this in-engine (version-independent).
-                # The MJCF text under "xml"; each asset base64 under a "<name>__b64__" key.
-                import base64  # noqa: PLC0415
-                reply["xml"] = self._owner.model_bytes.decode("utf-8", "replace")
-                reply["vfs_assets"] = {
-                    f"{name}__b64__": base64.b64encode(data).decode("ascii")
-                    for name, data in self._owner.assets.items()
-                }
-            return msgpack.packb(reply, use_bin_type=True)
+            return msgpack.packb(
+                self._owner.hello_reply(bus=f"grpc://{ep}" if ep else ""),
+                use_bin_type=True)
         return msgpack.packb(
             {"ok": False, "error": f"unknown op {op!r}"}, use_bin_type=True)
 

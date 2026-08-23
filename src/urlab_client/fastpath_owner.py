@@ -5,8 +5,9 @@ puppet script, or a UE live/direct instance). It offers two things to a
 renderer:
 
 * a **control channel** (ZMQ REQ/REP) that answers ``fastpath_hello`` with the
-  model's compiled MJB bytes and the transform-bus endpoint, so a renderer can
-  connect with no shared file, and
+  model (declaring its ``model_format``: mjb | xml | mjz, plus the asset bundle
+  an xml references) and the transform-bus endpoint, so a renderer can connect
+  with no shared file, and
 * the **render transform bus** (ZMQ PUB, topic ``render``) that carries the
   per-body render tier (transforms + an optional capability-gated debug tier)
   every step.
@@ -22,6 +23,7 @@ subscribes to the bus, and renders. No physics runs on the renderer.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import socket
@@ -246,6 +248,43 @@ class FastPathOwner:
     def control_endpoint(self) -> str:
         return self._control_endpoint
 
+    # -- hello -------------------------------------------------------------- #
+    def hello_reply(self, bus: Optional[str] = None) -> dict:
+        """Build the ONE ``fastpath_hello`` reply schema, identical on every
+        transport face (render source-of-truth §11): ``{ok, scene, ngeom,
+        capabilities, bus, model_format, model|mjb, vfs_assets?}``.
+
+        Field names match the UE ``MjRendererDriverClient::FetchModel`` reader:
+        ``model_format`` selects the loader on the renderer -- ``mjb`` ships the
+        compiled bytes under ``mjb`` (version-locked), anything else ships the
+        source under ``xml`` plus its asset bundle under ``vfs_assets`` (each
+        asset base64 under a ``<name>__b64__`` key) so the renderer compiles it
+        with its OWN libmujoco (version-independent). ``bus`` overrides the
+        advertised ZMQ bus endpoint for faces that stream elsewhere (the gRPC
+        face passes ``grpc://<endpoint>``).
+        """
+        reply = {
+            "ok": True,
+            "scene": self._scene,
+            "ngeom": self._ngeom,
+            "capabilities": list(self.capabilities),
+            "model_format": self._model_format,
+            "bus": self._bus_endpoint if bus is None else bus,
+            # generic aliases (kept for non-UE consumers)
+            "model": self._mjb, "format": self._model_format,
+        }
+        if self._model_format == "mjb":
+            # bytes -> msgpack bin; UE reads it as base64 under `mjb__b64__`.
+            reply["mjb"] = self._mjb
+        else:
+            # xml/mjz: FetchModel compiles this in-engine (version-independent).
+            reply["xml"] = self._mjb.decode("utf-8", "replace")
+            reply["vfs_assets"] = {
+                f"{name}__b64__": base64.b64encode(data).decode("ascii")
+                for name, data in self._assets.items()
+            }
+        return reply
+
     # -- registry ----------------------------------------------------------- #
     def _write_registry(self) -> None:
         """Write/refresh the discovery entry atomically."""
@@ -320,15 +359,10 @@ class FastPathOwner:
             return msgpack.packb({"error": "bad request"}, use_bin_type=True)
         op = req.get("op") if isinstance(req, dict) else None
         if op == "fastpath_hello":
-            reply = {
-                "ok": True,
-                "scene": self._scene,
-                "ngeom": self._ngeom,
-                "bus": self._bus_endpoint,
-                # bytes -> msgpack bin; UE reads it as base64 under `mjb__b64__`.
-                "mjb": self._mjb,
-            }
-            return msgpack.packb(reply, use_bin_type=True)
+            # One hello schema on every transport face (§11): declares
+            # model_format so a renderer picks the right loader instead of
+            # feeding xml/mjz source into mj_loadModelBuffer.
+            return msgpack.packb(self.hello_reply(), use_bin_type=True)
         if op == "fastpath_perturb":
             # A renderer/viewer pushes an external force/torque on a body. Refused
             # unless the AcceptInput capability is granted (mirrors UE's
