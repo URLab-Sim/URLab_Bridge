@@ -174,6 +174,13 @@ class FastPathOwner:
         # for a gRPC subscribe(format=render) stream -- the true mirror payload
         # (viewer runs zero MuJoCo). Written by every publish_bodies/publish_mjdata.
         self._latest_transforms: "Optional[dict]" = None
+        # Debug-tier caps a render subscriber negotiated (source-of-truth §8.2).
+        # Defaults to none so a lean mirror pays zero extra bytes; a subscribe
+        # request populates it via set_render_debug_caps and it gates what
+        # _append_render_debug_fields serializes onto every published frame.
+        self._render_debug_caps: dict = {
+            "contacts": False, "overlay": False, "max_contacts": 0,
+        }
         self._grpc_server = None  # optional; started by start_grpc_server()
         self._grpc_endpoint: Optional[str] = None
         self._write_registry()
@@ -473,30 +480,143 @@ class FastPathOwner:
             payload["ucup"] = [float(v) for v in up]
         return payload
 
-    def _append_render_debug_fields(self, frame: dict, caps=None) -> None:
-        """Capability-gated, count-capped seam (source-of-truth §8.2) that appends
-        the optional debug tier onto a render frame. A subscriber that requests
-        neither ``StreamContacts`` nor ``StreamOverlay`` pays zero extra bytes, so
-        this returns immediately when no cap is set.
+    @staticmethod
+    def parse_render_debug_caps(req) -> dict:
+        """Parse the debug-tier subscription capabilities off a subscribe request
+        (source-of-truth §8.2): ``contacts`` (bool) toggles ``StreamContacts``,
+        ``overlay`` (bool) toggles ``StreamOverlay``, and ``maxcontacts`` (int,
+        alias ``max_contacts``) sets the contact cap. Absent/false keys leave the
+        cap off, so a lean mirror that asks for nothing gets zero extra bytes."""
+        req = req or {}
+        try:
+            maxc = int(req.get("maxcontacts", req.get("max_contacts", 0)) or 0)
+        except (TypeError, ValueError):
+            maxc = 0
+        return {
+            "contacts": bool(req.get("contacts", False)),
+            "overlay": bool(req.get("overlay", False)),
+            "max_contacts": max(0, maxc),
+        }
 
-        Phase 2.3 establishes the hook only; Phase 9.1 computes + serializes the
-        §8.2 debug arrays here -- ``contacts`` (capped at ``caps['max_contacts']``)
-        when ``StreamContacts``, and the derived-decor bundle (``xfrc_applied`` /
-        ``subtree_com`` / ``ctrl`` / ``act`` / ``wrap_xpos`` / ``eq`` / ``sensor``
-        / light glyphs) when ``StreamOverlay``.
+    def set_render_debug_caps(self, caps) -> None:
+        """Record the debug-tier caps a render subscriber negotiated. Gates what
+        :meth:`_append_render_debug_fields` serializes onto every published frame;
+        defaults to none so a lean mirror pays zero extra bytes."""
+        with self._lock:
+            self._render_debug_caps = self.parse_render_debug_caps(caps)
+
+    def _append_render_debug_fields(self, frame: dict, model=None, data=None,
+                                    caps=None) -> None:
+        """Capability-gated, count-capped debug tier (source-of-truth §8.2) computed
+        straight from ``model``/``data`` after the step. A subscriber that requests
+        neither ``StreamContacts`` nor ``StreamOverlay`` pays zero extra bytes, so
+        this returns immediately when no cap is set (or when no mjData is at hand).
+
+        Serializes ``contacts`` (capped at ``caps['max_contacts']``) under
+        ``StreamContacts``, and the derived-decor bundle (``xfrc_applied`` /
+        ``subtree_com`` / ``ctrl`` / ``act`` / ``wrap_xpos`` (+ ``wrap_obj`` /
+        ``ten_wrapadr`` / ``ten_wrapnum``) / ``eq_active`` + ``eq_anchor`` /
+        ``sensordata`` / light ``light_xpos``+``light_xdir``) under
+        ``StreamOverlay``.
         """
         if not caps or not (caps.get("contacts") or caps.get("overlay")):
             return
-        # SEAM (Phase 9.1): populate the §8.2 debug arrays on ``frame`` here.
+        if model is None or data is None:
+            return
+        import mujoco  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
 
-    def _send_transforms(self, payload: dict, cxpos, cxquat, usercam=None) -> None:
+        def flat(a):
+            return [float(x) for x in np.asarray(a, dtype=float).ravel()]
+
+        def flat_i(a):
+            return [int(x) for x in np.asarray(a).ravel()]
+
+        # --- StreamContacts: the contact list, capped at the subscriber's cap ---
+        # contacts[] = [{pos[3], frame[9], dist, force[6], dim, g1, g2}]; force via
+        # mj_contactForce (force:torque in the contact frame). Truncated to
+        # caps['max_contacts'], mirroring MuJoCo's scn->maxgeom bound.
+        if caps.get("contacts"):
+            ncon = int(data.ncon)
+            cap = int(caps.get("max_contacts") or 0)
+            n = min(ncon, cap) if cap > 0 else ncon
+            contacts = []
+            force = np.zeros(6, dtype=float)
+            for c in range(n):
+                con = data.contact[c]
+                mujoco.mj_contactForce(model, data, c, force)
+                contacts.append({
+                    "pos": flat(con.pos),
+                    "frame": flat(con.frame),
+                    "dist": float(con.dist),
+                    "force": [float(x) for x in force],
+                    "dim": int(con.dim),
+                    "g1": int(con.geom[0]),
+                    "g2": int(con.geom[1]),
+                })
+            frame["contacts"] = contacts
+
+        # --- StreamOverlay: the derived-decor bundle, each array capped by its ----
+        # natural model dimension and appended only when that dimension is non-zero.
+        if caps.get("overlay"):
+            nbody = int(model.nbody)
+            if nbody > 0:
+                # Perturbation / external-force arrows (computed every step anyway).
+                frame["xfrc_applied"] = flat(data.xfrc_applied)   # 6*nbody
+                frame["subtree_com"] = flat(data.subtree_com)     # 3*nbody, CoM spheres
+            if int(model.nu) > 0:
+                frame["ctrl"] = flat(data.ctrl)                   # actuator coloring
+            if int(model.na) > 0:
+                frame["act"] = flat(data.act)
+            # Tendon wrap paths + slicing arrays (segment per tendon consumer-side).
+            if int(model.nwrap) > 0:
+                frame["wrap_xpos"] = flat(data.wrap_xpos)         # 6*nwrap
+                frame["wrap_obj"] = flat_i(data.wrap_obj)         # 2*nwrap
+            if int(model.ntendon) > 0:
+                frame["ten_wrapadr"] = flat_i(data.ten_wrapadr)
+                frame["ten_wrapnum"] = flat_i(data.ten_wrapnum)
+            # Equality-constraint decor: eq_active is the only DYNAMIC quantity a
+            # mirror can't reconstruct (it has eq_type/eq_obj*/eq_data statically).
+            # eq_anchor carries the two world anchor endpoints per equality
+            # (body-origin convention; world body -> 0), ready to draw.
+            neq = int(model.neq)
+            if neq > 0:
+                xpos = np.asarray(data.xpos, dtype=float).reshape(-1, 3)
+                eq_anchor = []
+                for e in range(neq):
+                    b1 = int(model.eq_obj1id[e])
+                    b2 = int(model.eq_obj2id[e])
+                    p1 = xpos[b1] if 0 < b1 < nbody else np.zeros(3)
+                    p2 = xpos[b2] if 0 < b2 < nbody else np.zeros(3)
+                    eq_anchor.extend(float(x) for x in p1)
+                    eq_anchor.extend(float(x) for x in p2)
+                frame["eq_active"] = flat_i(data.eq_active)        # neq
+                frame["eq_anchor"] = eq_anchor                    # 6*neq
+            # Rangefinder / sensor decor.
+            if int(model.nsensordata) > 0:
+                frame["sensordata"] = flat(data.sensordata)
+            # Light glyphs (cameras already ride cxpos/cxquat §8.1; lights do not).
+            if int(model.nlight) > 0:
+                frame["light_xpos"] = flat(data.light_xpos)       # 3*nlight
+                frame["light_xdir"] = flat(data.light_xdir)       # 3*nlight
+
+    def _send_transforms(self, payload: dict, cxpos, cxquat, usercam=None,
+                         model=None, data=None) -> None:
         """Build one render-tier frame and publish it on the ``render`` topic.
-        Best-effort: a slow/absent renderer never stalls the sim."""
+        Best-effort: a slow/absent renderer never stalls the sim.
+
+        ``model``/``data``, when given (via :meth:`publish_mjdata`), let the
+        capability-gated debug tier (§8.2) be appended for whatever a subscriber
+        negotiated; without them only the transform tier is published."""
         frame = self._build_render_frame(payload, cxpos, cxquat, usercam)
-        # Debug tier carries no extra bytes over the ZMQ bus: the topic-per-tier bus
-        # advertises the render tier only; per-subscription debug caps are negotiated
-        # on the gRPC selector (wired in 9.1). Pass no caps so the seam is a no-op.
-        self._append_render_debug_fields(frame, None)
+        # Append the debug tier for whatever a render subscriber negotiated
+        # (set_render_debug_caps records it off the subscribe request). Default is
+        # none, so a lean mirror -- and the topic-per-tier ZMQ bus, which advertises
+        # the render tier only -- pays zero extra bytes. The cached frame below is
+        # re-used byte-for-byte by a gRPC subscribe(format=render) stream.
+        with self._lock:
+            caps = dict(self._render_debug_caps)
+        self._append_render_debug_fields(frame, model, data, caps)
         # Cache the fully-assembled frame for a gRPC subscribe(format=render) stream,
         # so a gRPC mirror gets byte-identical frames to a ZMQ mirror. The ZMQ
         # publish below stays independent + best-effort.
@@ -534,9 +654,13 @@ class FastPathOwner:
         from .render_client import poses_from_mjdata  # lazy import
 
         poses = poses_from_mjdata(model, data, refresh_kinematics=refresh_kinematics)
-        self.publish_bodies(
-            frame, poses["bxpos"], poses["bxquat"],
-            cxpos=poses["cxpos"], cxquat=poses["cxquat"], usercam=usercam,
+        # Route (model, data) through so the capability-gated debug tier (§8.2) can
+        # be computed post-step; publish_bodies has no mjData so it stays transforms
+        # only.
+        self._send_transforms(
+            {"f": int(frame), "bxpos": list(poses["bxpos"]),
+             "bxquat": list(poses["bxquat"])},
+            poses["cxpos"], poses["cxquat"], usercam, model=model, data=data,
         )
 
     def publish_geoms(self, frame: int, xpos, xquat, cxpos=None, cxquat=None) -> None:

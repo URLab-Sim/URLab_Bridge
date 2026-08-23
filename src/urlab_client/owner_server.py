@@ -85,6 +85,18 @@ class _OwnerServicer:
                 # in Phase 3.2. This stream is dedicated to the subscription; stream
                 # frames until the client goes away, then end (don't read further
                 # requests).
+                #
+                # Parse the debug-tier caps off the subscribe request (§8.2:
+                # {contacts, overlay, maxcontacts}) and record them on the owner so
+                # every published frame carries exactly the wanted debug fields --
+                # count-capped, and zero extra bytes when the subscriber asks for
+                # none.
+                try:
+                    sub_req = msgpack.unpackb(
+                        bytes(pkt.payload), raw=False, strict_map_key=False)
+                except Exception:  # noqa: BLE001
+                    sub_req = {}
+                self._owner.set_render_debug_caps(sub_req)
                 yield from self._stream_render(context, pkt.sequence_id)
                 return
             reply = self._dispatch(op, bytes(pkt.payload))
