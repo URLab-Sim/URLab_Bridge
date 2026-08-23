@@ -24,11 +24,11 @@ Actions (joint position targets) are sent back via ZMQ control.
 """
 
 import logging
-import struct
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import msgpack
 import numpy as np
 import zmq
 
@@ -483,7 +483,13 @@ class LeRobotRunner:
                 break
 
     def _discover_camera_endpoints(self):
-        """Discover additional camera endpoints from the info socket."""
+        """Discover additional camera endpoints from the info socket.
+
+        NOTE: the `:5557` info broadcast was retired in 5.3, so this subscribe
+        now receives nothing and simply times out (RCVTIMEO=2000). No endpoints
+        are added, which is harmless -- the runner falls back to whatever camera
+        endpoints are already connected / configured. A replacement discovery
+        mechanism is a pending design decision."""
         import json
         info_sub = self._ctx.socket(zmq.SUB)
         info_sub.connect(self.cfg.info_endpoint)
@@ -514,7 +520,14 @@ class LeRobotRunner:
             info_sub.close()
 
     def _discover_actuator_ids(self):
-        """Query the info endpoint for actuator ID mapping."""
+        """Query the info endpoint for actuator ID mapping.
+
+        NOTE: the `:5557` `actuator_list` broadcast was retired in 5.3, so this
+        subscribe now receives nothing and simply times out (RCVTIMEO=3000),
+        returning `{}`. That is intentional graceful degradation: an empty map
+        makes `_send_action` fall back to ordinal actuator ids, which keeps the
+        control path working without a crash. A replacement discovery mechanism
+        is a pending design decision (full migration not done yet)."""
         info_sub = self._ctx.socket(zmq.SUB)
         info_sub.connect(self.cfg.info_endpoint)
         info_sub.setsockopt_string(zmq.SUBSCRIBE, "")
@@ -713,27 +726,38 @@ class LeRobotRunner:
         return obs
 
     def _send_action(self, action: np.ndarray, joint_order: list[str]):
-        """Send action as joint position targets via ZMQ."""
-        n = len(action)
-        data = struct.pack("<i", n)
+        """Send action as joint position targets via ZMQ.
 
-        # Build actuator ID list from joint order
+        Control-in is a msgpack `{ids:[...], vals:[...]}` payload parsed
+        UE-side by FURLabMsgpackUtil (5.3). The legacy little-endian
+        `[i32 n][i32 id, f32 val]*` binary format is retired -- the UE
+        unsafe-cast parser was removed, so emitting it now mismatches.
+        """
+        n = len(action)
+
+        # Build actuator ID list from joint order.
         name_to_id = {}
         if self._actuator_ids:
             name_to_id = self._actuator_ids
         else:
-            # Fallback: use ZMQ joint IDs
+            # Fallback: use ZMQ joint IDs (or bare ordinal `i` per joint if
+            # even those are absent). This is the path taken now that the
+            # `:5557` actuator_list broadcast is gone (see _discover_actuator_ids).
             name_to_id = self._joint_ids
 
+        ids = []
+        vals = []
         for i in range(n):
             jname = joint_order[i] if i < len(joint_order) else f"joint_{i}"
-            # Try exact match, then without _joint suffix
+            # Try exact match, then without _joint suffix, then ordinal.
             aid = name_to_id.get(jname,
                    name_to_id.get(jname.removesuffix("_joint"), i))
-            data += struct.pack("<if", int(aid), float(action[i]))
+            ids.append(int(aid))
+            vals.append(float(action[i]))
 
+        payload = msgpack.packb({"ids": ids, "vals": vals}, use_bin_type=True)
         self._ctrl_pub.send_string(f"{self._prefix}/control ", zmq.SNDMORE)
-        self._ctrl_pub.send(data)
+        self._ctrl_pub.send(payload)
 
     def run(self, stop_event=None):
         """

@@ -28,10 +28,10 @@ Usage:
 import argparse
 import json
 import logging
-import struct
 import time
 from pathlib import Path
 
+import msgpack
 import mujoco
 import numpy as np
 import zmq
@@ -354,6 +354,13 @@ class ZMQInterface:
         self.pub = self.ctx.socket(zmq.PUB)
         self.pub.connect(control_ep)
 
+        # NOTE: the `:5557` `actuator_list` info broadcast was retired in 5.3.
+        # This SUB now never receives anything -- recv() would just time out
+        # (RCVTIMEO=2000). We keep the socket for call-site compatibility but do
+        # not depend on it: send_joints() uses ordinal actuator ids (see
+        # execute_trajectory's `list(range(...))`), so discovery failing here is
+        # harmless. Full discovery migration (a replacement for the retired
+        # broadcast) is a pending design decision.
         self.info_sub = self.ctx.socket(zmq.SUB)
         self.info_sub.connect(info_ep)
         self.info_sub.setsockopt_string(zmq.SUBSCRIBE, "")
@@ -416,13 +423,19 @@ class ZMQInterface:
         return self.articulations.get(prefix, {}).get("base_pos")
 
     def send_joints(self, prefix: str, targets: np.ndarray, actuator_ids: list[int]):
-        """Send joint targets using proven direct struct.pack method."""
+        """Send joint targets on the `{prefix}/control ` topic.
+
+        Control-in is a msgpack `{ids:[...], vals:[...]}` payload parsed
+        UE-side by FURLabMsgpackUtil (5.3). The legacy little-endian
+        `[i32 n][i32 id, f32 val]*` binary format is retired -- the UE
+        unsafe-cast parser was removed, so emitting it now mismatches.
+        """
         n = len(targets)
-        data = struct.pack("<i", n)
-        for i in range(n):
-            data += struct.pack("<if", int(actuator_ids[i]), float(targets[i]))
+        ids = [int(actuator_ids[i]) if actuator_ids else i for i in range(n)]
+        vals = [float(targets[i]) for i in range(n)]
+        payload = msgpack.packb({"ids": ids, "vals": vals}, use_bin_type=True)
         self.pub.send_string(f"{prefix}/control ", zmq.SNDMORE)
-        self.pub.send(data)
+        self.pub.send(payload)
 
     def find_by_role(self, role: str) -> str | None:
         for prefix in self.articulations:

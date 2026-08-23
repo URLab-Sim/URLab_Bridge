@@ -254,12 +254,26 @@ class FastPathOwner:
             "control_port": self._control_port,
             "bus": self._bus_endpoint,
             "bus_port": self._bus_port,
+            # Canonical port keys shared with the UE writer (InstanceRegistry.cpp)
+            # and read by pool.read_registry (source-of-truth §12). A Python
+            # owner's control REP is its step channel; it has no separate
+            # full-state PUB or camera SHM ports, so those are 0 (pool.py falls
+            # back to the index-derived port on a 0/absent value).
+            "step_port": self._control_port,
+            "state_port": 0,
+            "cam_base_port": 0,
+            # A fastpath owner always holds and steps a live model (it is its own
+            # manager) and does not track a busy state.
+            "manager_present": True,
+            "busy": False,
             # Which transports viewers can reach this owner on. "zmq" is always up
             # (control REP + viewer PUB); "grpc" is added once start_grpc_server ran.
             "transports": ["zmq"] + (["grpc"] if getattr(self, "_grpc_endpoint", None) else []),
             "grpc": getattr(self, "_grpc_endpoint", None),
-            # int epoch so both the UE reader and pool.py parse it (pool.py only
-            # accepts a numeric registry_written_at).
+            # Timestamp key `registry_written_at` is shared with the UE writer and
+            # read by discover_owners / pool.read_registry / MjDriverDiscovery.
+            # int epoch here (pool.py only accepts a numeric value); the readers
+            # normalize int-epoch vs the UE writer's ISO-8601 string.
             "registry_written_at": int(time.time()),
         }
         try:
