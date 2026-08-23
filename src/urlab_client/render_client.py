@@ -310,8 +310,6 @@ class RenderClient:
         cxquat: Optional[Sequence[float]] = None,
         geom_pos: Optional[Sequence[float]] = None,
         geom_quat: Optional[Sequence[float]] = None,
-        gxpos: Optional[Sequence[float]] = None,
-        gxquat: Optional[Sequence[float]] = None,
         sim_time: float = 0.0,
         cameras: Optional[Sequence[str]] = None,
         user_pose: Optional[UserPose] = None,
@@ -340,10 +338,6 @@ class RenderClient:
             req["geom_pos"] = _tolist(geom_pos)
         if geom_quat is not None:
             req["geom_quat"] = _tolist(geom_quat)
-        if gxpos is not None:
-            req["gxpos"] = _tolist(gxpos)
-        if gxquat is not None:
-            req["gxquat"] = _tolist(gxquat)
         if cxpos is not None:
             req["cxpos"] = _tolist(cxpos)
         if cxquat is not None:

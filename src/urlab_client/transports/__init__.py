@@ -231,7 +231,17 @@ def make_transport(
     rpc_req_event: Optional[str] = None,
     rpc_rep_event: Optional[str] = None,
 ) -> Transport:
-    """Pluggable transport factory. Supports `name in {"zmq", "shm"}`.
+    """Pluggable transport factory. `name` is either a bare backend name
+    (`"zmq"`, `"shm"`, `"grpc"`) or a full endpoint URI whose scheme selects
+    the backend (source-of-truth 9.1):
+
+        tcp://host:port   -> ZMQ   (port = step/RPC port)
+        grpc://host:port  -> gRPC  (port = gRPC listen port)
+        shm://<dir>       -> SHM   (dir  = session dir)
+
+    A URI's authority/path overrides the corresponding keyword arguments
+    (`address` / `step_port` / `shm_dir`); the remaining keywords are honored
+    as usual so callers can still tune timeouts and the SHM fallback.
 
     For `"shm"`, `shm_dir` is required (the bridge passes the dir reported
     by the UE handshake, or the user's explicit override). The SHM
@@ -239,6 +249,35 @@ def make_transport(
     slot (notably `hello`, which embeds the MJB) -- pass an existing one
     via `fallback`, or one will be constructed.
     """
+    # A full endpoint URI is the one selector: parse the scheme, fold the
+    # authority/path onto the matching keyword, then fall through to the same
+    # per-backend construction bare names use. Bare names never contain "://",
+    # so this leaves the existing name paths untouched.
+    if "://" in name:
+        parsed = urlparse(name)
+        scheme = parsed.scheme
+        if scheme == "tcp":
+            if parsed.hostname:
+                address = f"tcp://{parsed.hostname}"
+            if parsed.port is not None:
+                step_port = parsed.port
+            name = "zmq"
+        elif scheme == "grpc":
+            if parsed.hostname:
+                address = f"tcp://{parsed.hostname}"
+            if parsed.port is not None:
+                step_port = parsed.port
+            name = "grpc"
+        elif scheme == "shm":
+            # shm://<session-dir>: the dir is everything after the scheme
+            # (netloc for a relative dir, path for an absolute "shm:///abs").
+            shm_dir = (parsed.netloc + parsed.path) or shm_dir
+            name = "shm"
+        else:
+            raise ValueError(
+                f"unknown endpoint scheme {scheme!r} in {name!r}; expected "
+                "'tcp://', 'grpc://' or 'shm://'"
+            )
     # Lazy imports so users can swap transports without dragging zmq/mmap
     # into a deployment that won't use them.
     if name == "zmq":

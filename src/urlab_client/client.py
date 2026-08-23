@@ -25,6 +25,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -258,7 +259,35 @@ class URLabClient:
         # ZMQ transport first; SHM construction is deferred to connect().
         self._transport_pref: str = "explicit"
         if isinstance(transport, str):
-            if transport in ("zmq", "shm", "auto"):
+            # The selector accepts either a bare backend name
+            # ("auto"/"zmq"/"shm"/"grpc") or a full endpoint URI whose scheme
+            # picks the backend (source-of-truth 9.1):
+            #   tcp://host:port  -> ZMQ    grpc://host:port -> gRPC
+            #   shm://<dir>      -> SHM
+            # A URI's authority/path overrides address/step_port/shm_dir so the
+            # endpoint is fully self-describing. "auto" is NOT a wire scheme --
+            # it stays the locality policy layered on top (hello over ZMQ, then
+            # upgrade to SHM when co-located), so it keeps bootstrapping ZMQ.
+            scheme = transport.split("://", 1)[0] if "://" in transport else transport
+            if "://" in transport:
+                parsed = urlparse(transport)
+                if scheme in ("tcp", "grpc"):
+                    if parsed.hostname:
+                        address = self.address = f"tcp://{parsed.hostname}"
+                    if parsed.port is not None:
+                        step_port = self.step_port = parsed.port
+                elif scheme == "shm":
+                    # shm://<session-dir>: everything after the scheme is the dir.
+                    self._shm_dir_override = transport.split("://", 1)[1] or self._shm_dir_override
+                else:
+                    raise ValueError(
+                        f"unknown endpoint scheme {scheme!r} in {transport!r}; "
+                        "expected 'tcp://', 'grpc://' or 'shm://'"
+                    )
+            if scheme in ("zmq", "tcp", "shm", "auto"):
+                # All ZMQ-bootstrapped paths: hello (and, for shm, everything
+                # until connect() upgrades) rides ZMQ. shm/auto flip _want_shm so
+                # connect() swaps in the SHM transport once the session dir is known.
                 self._transport: Transport = make_transport(
                     "zmq",
                     address,
@@ -266,12 +295,24 @@ class URLabClient:
                     state_port=state_port,
                     recv_timeout_ms=recv_timeout_ms,
                 )
-                self._want_shm = (transport == "shm")
-                self._transport_pref = transport
+                self._want_shm = scheme == "shm"
+                # Bare "zmq"/"tcp://" -> "zmq"; shm/auto keep their own pref.
+                self._transport_pref = "zmq" if scheme == "tcp" else scheme
+            elif scheme == "grpc":
+                # gRPC is its own transport end to end (hello over gRPC); there is
+                # no ZMQ bootstrap and no SHM upgrade.
+                self._transport = make_transport(
+                    "grpc",
+                    address,
+                    step_port=step_port,
+                    recv_timeout_ms=recv_timeout_ms,
+                )
+                self._transport_pref = "grpc"
             else:
                 raise ValueError(
                     f"unknown transport name {transport!r}; expected "
-                    f"'auto', 'zmq' or 'shm', or pass a Transport instance"
+                    f"'auto', 'zmq', 'shm' or 'grpc', a 'tcp://'/'grpc://'/'shm://' "
+                    f"URI, or a Transport instance"
                 )
         else:
             self._transport = transport

@@ -253,8 +253,6 @@ class RenderPool:
         cxquat: Optional[Sequence[float]] = None,
         geom_pos: Optional[Sequence[float]] = None,
         geom_quat: Optional[Sequence[float]] = None,
-        gxpos: Optional[Sequence[float]] = None,
-        gxquat: Optional[Sequence[float]] = None,
         sim_time: float = 0.0,
         cameras: Optional[Sequence[str]] = None,
         user_pose: Optional[UserPose] = None,
@@ -269,10 +267,10 @@ class RenderPool:
         only to the instance that draws :data:`USER_CAMERA` this frame. ``delay`` is
         in **seconds** (server-side latency-ring sampling).
 
-        ``geom_pos``/``geom_quat`` (local geom offsets) and ``gxpos``/``gxquat``
-        (world geom transforms) are the reset-time re-baseline fields. They are only
-        forwarded to instances that render a camera this frame, so to guarantee
-        **every** instance is re-baselined (including idle ones) use :meth:`reset`.
+        ``geom_pos``/``geom_quat`` (local geom offsets) are the reset-time
+        re-baseline fields. They are only forwarded to instances that render a camera
+        this frame, so to guarantee **every** instance is re-baselined (including idle
+        ones) use :meth:`reset`.
         """
         names = list(cameras) if cameras is not None else self.camera_names()
         buckets = self._distribute(names)
@@ -284,7 +282,7 @@ class RenderPool:
             up = user_pose if (user_pose is not None and USER_CAMERA in subset) else None
             return client.render(
                 bxpos=bxpos, bxquat=bxquat, cxpos=cxpos, cxquat=cxquat,
-                geom_pos=geom_pos, geom_quat=geom_quat, gxpos=gxpos, gxquat=gxquat,
+                geom_pos=geom_pos, geom_quat=geom_quat,
                 sim_time=sim_time, cameras=subset, user_pose=up,
                 delay=delay, timeout_ms=timeout_ms,
             )
