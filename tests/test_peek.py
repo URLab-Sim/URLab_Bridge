@@ -153,7 +153,7 @@ def test_grpc_owner_stream_and_perturb(tmp_path):
 
 
 def test_grpc_owner_transform_stream_and_hello(tmp_path):
-    """Owner gRPC server, mirror path: subscribe(format=transforms) streams the
+    """Owner gRPC server, mirror path: subscribe(format=render) streams the
     per-body bxpos/bxquat payload under stream_cameras, fastpath_hello returns the
     model bytes + format, and a no-stream_cameras owner refuses the subscribe."""
     import grpc
@@ -187,7 +187,7 @@ def test_grpc_owner_transform_stream_and_hello(tmp_path):
         assert "stream_cameras" in hello["capabilities"]
 
         owner.publish_bodies(7, bxpos=[1.0, 2.0, 3.0], bxquat=[1.0, 0.0, 0.0, 0.0])
-        for r in stub.Process(iter([sub_pkt("subscribe", {"format": "transforms"})])):
+        for r in stub.Process(iter([sub_pkt("subscribe", {"format": "render"})])):
             op, fr = unwrap(r); break
         assert op == "view_frame"
         assert list(fr["bxpos"]) == [1.0, 2.0, 3.0] and fr["f"] == 7
@@ -202,7 +202,7 @@ def test_grpc_owner_transform_stream_and_hello(tmp_path):
     ro.start_grpc_server(port=port2)
     stub2 = dm_env_rpc_pb2_grpc.EnvironmentStub(grpc.insecure_channel(f"127.0.0.1:{port2}"))
     try:
-        for r in stub2.Process(iter([sub_pkt("subscribe", {"format": "transforms"})])):
+        for r in stub2.Process(iter([sub_pkt("subscribe", {"format": "render"})])):
             _, reply = unwrap(r); break
         assert reply["ok"] is False and "stream_cameras" in reply["error"]
     finally:

@@ -7,8 +7,9 @@ renderer:
 * a **control channel** (ZMQ REQ/REP) that answers ``fastpath_hello`` with the
   model's compiled MJB bytes and the transform-bus endpoint, so a renderer can
   connect with no shared file, and
-* the **geoms transform bus** (ZMQ PUB, topic ``geoms``) that carries per-geom
-  world transforms every step.
+* the **render transform bus** (ZMQ PUB, topic ``render``) that carries the
+  per-body render tier (transforms + an optional capability-gated debug tier)
+  every step.
 
 The owner also writes a **registry entry** (a JSON file in the shared registry
 directory, the same directory UE bridge servers use) so a UE renderer's server
@@ -171,7 +172,7 @@ class FastPathOwner:
         self._pert_sel = None      # body id localmass was last initialised for
         self._latest_state: "Optional[tuple[float, list, list]]" = None
         # Latest per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?}) cached
-        # for a gRPC subscribe(format=transforms) stream -- the true mirror payload
+        # for a gRPC subscribe(format=render) stream -- the true mirror payload
         # (viewer runs zero MuJoCo). Written by every publish_bodies/publish_mjdata.
         self._latest_transforms: "Optional[dict]" = None
         self._grpc_server = None  # optional; started by start_grpc_server()
@@ -440,14 +441,16 @@ class FastPathOwner:
     def latest_transforms(self) -> "Optional[dict]":
         """The most recent per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?})
         published via :meth:`publish_bodies`/:meth:`publish_mjdata`, or None. Read by
-        a gRPC subscribe(format=transforms) stream; thread-safe (returns a copy)."""
+        a gRPC subscribe(format=render) stream; thread-safe (returns a copy)."""
         with self._lock:
             return dict(self._latest_transforms) if self._latest_transforms else None
 
     # -- transform bus ------------------------------------------------------ #
-    def _send_transforms(self, payload: dict, cxpos, cxquat, usercam=None) -> None:
-        """Attach optional per-camera transforms and publish one frame on the
-        ``geoms`` topic. Best-effort: a slow/absent renderer never stalls the sim.
+    def _build_render_frame(self, payload: dict, cxpos, cxquat, usercam=None) -> dict:
+        """Assemble the always-present render tier (source-of-truth §8.1): the
+        per-body/per-geom transforms already in ``payload``, plus the optional
+        per-camera and operator free-camera pose. Returns the frame dict; debug
+        fields (§8.2) are appended separately by :meth:`_append_render_debug_fields`.
 
         ``usercam``, when given, is a ``(pos, fwd, up)`` triple of MuJoCo-world
         3-vectors for the operator's free/user camera; a render slave in "copycat"
@@ -461,14 +464,40 @@ class FastPathOwner:
             payload["ucpos"] = [float(v) for v in pos]
             payload["ucfwd"] = [float(v) for v in fwd]
             payload["ucup"] = [float(v) for v in up]
-        # Cache the fully-assembled frame for a gRPC subscribe(format=transforms)
-        # stream, so a gRPC mirror gets byte-identical frames to a ZMQ mirror. The
-        # ZMQ publish below stays independent + best-effort.
+        return payload
+
+    def _append_render_debug_fields(self, frame: dict, caps=None) -> None:
+        """Capability-gated, count-capped seam (source-of-truth §8.2) that appends
+        the optional debug tier onto a render frame. A subscriber that requests
+        neither ``StreamContacts`` nor ``StreamOverlay`` pays zero extra bytes, so
+        this returns immediately when no cap is set.
+
+        Phase 2.3 establishes the hook only; Phase 9.1 computes + serializes the
+        §8.2 debug arrays here -- ``contacts`` (capped at ``caps['max_contacts']``)
+        when ``StreamContacts``, and the derived-decor bundle (``xfrc_applied`` /
+        ``subtree_com`` / ``ctrl`` / ``act`` / ``wrap_xpos`` / ``eq`` / ``sensor``
+        / light glyphs) when ``StreamOverlay``.
+        """
+        if not caps or not (caps.get("contacts") or caps.get("overlay")):
+            return
+        # SEAM (Phase 9.1): populate the §8.2 debug arrays on ``frame`` here.
+
+    def _send_transforms(self, payload: dict, cxpos, cxquat, usercam=None) -> None:
+        """Build one render-tier frame and publish it on the ``render`` topic.
+        Best-effort: a slow/absent renderer never stalls the sim."""
+        frame = self._build_render_frame(payload, cxpos, cxquat, usercam)
+        # Debug tier carries no extra bytes over the ZMQ bus: the topic-per-tier bus
+        # advertises the render tier only; per-subscription debug caps are negotiated
+        # on the gRPC selector (wired in 9.1). Pass no caps so the seam is a no-op.
+        self._append_render_debug_fields(frame, None)
+        # Cache the fully-assembled frame for a gRPC subscribe(format=render) stream,
+        # so a gRPC mirror gets byte-identical frames to a ZMQ mirror. The ZMQ
+        # publish below stays independent + best-effort.
         with self._lock:
-            self._latest_transforms = dict(payload)
+            self._latest_transforms = dict(frame)
         try:
             self._pub.send_multipart(
-                [b"geoms", msgpack.packb(payload, use_bin_type=True)],
+                [b"render", msgpack.packb(frame, use_bin_type=True)],
                 flags=zmq.NOBLOCK,
             )
         except zmq.ZMQError:
@@ -476,7 +505,7 @@ class FastPathOwner:
 
     def publish_bodies(self, frame: int, bxpos, bxquat, cxpos=None, cxquat=None,
                        usercam=None) -> None:
-        """Publish one per-BODY transform frame on the ``geoms`` topic.
+        """Publish one per-BODY transform frame on the ``render`` topic.
 
         bxpos is a flat length-3*nbody sequence, bxquat length-4*nbody (wxyz) --
         i.e. ``data.xpos`` / ``data.xquat``. The renderer composes each geom's world
@@ -504,7 +533,7 @@ class FastPathOwner:
         )
 
     def publish_geoms(self, frame: int, xpos, xquat, cxpos=None, cxquat=None) -> None:
-        """Publish one per-geom transform frame on the ``geoms`` topic.
+        """Publish one per-geom transform frame on the ``render`` topic.
 
         xpos is a flat length-3*ngeom sequence, xquat length-4*ngeom (wxyz).
         cxpos/cxquat, when given, are the per-camera world transforms (3*ncam and

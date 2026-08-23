@@ -187,8 +187,9 @@ class Transport(ABC):
         return None
 
     def publish_geoms(self, payload: Mapping[str, Any]) -> None:
-        """Broadcast one per-geom world-transform frame (``{xpos, xquat}``) to
-        fast-path renderers on topic ``geoms``. No-op until the PUB is bound."""
+        """Broadcast one render-tier frame (per-body transforms + optional debug
+        fields) to fast-path renderers on topic ``render``. No-op until the PUB is
+        bound."""
         return None
 
     # -- viewer bus consumer (a viewer subscribes to an owner) ------------

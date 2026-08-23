@@ -26,9 +26,9 @@ Ops served (peek/viewer/VR are capability *consumers*, not modes):
   bytes + format (``xml``/``mjz``/``mjb``; xml/mjz are decoded in-engine, so a
   mirror needs no MJB version match).
 - ``subscribe`` -- gated on the ``stream_cameras`` capability; a server-stream of
-  the owner's view. ``format`` selects the payload: ``transforms`` (the true
-  mirror -- per-body ``bxpos``/``bxquat``, consumer runs zero MuJoCo; op
-  ``view_frame``) or ``qpos`` (``{t,qpos,qvel}``; op ``viewer_frame``).
+  the owner's view. ``format`` selects the tier: ``render`` (the true mirror --
+  per-body ``bxpos``/``bxquat`` + optional debug fields, consumer runs zero
+  MuJoCo; op ``view_frame``) or ``qpos`` (``{t,qpos,qvel}``; op ``viewer_frame``).
   ``subscribe_viewer`` is the back-compat alias for ``format=qpos``.
 - ``fastpath_perturb`` -- gated on the ``accept_input`` capability; into the
   owner's perturb queue.
@@ -56,13 +56,14 @@ def _pb():
 
 
 def _req_format(payload: bytes) -> str:
-    """Read the requested view format from a subscribe payload. Defaults to
-    'transforms' (the true mirror payload) -- 'qpos' only if explicitly asked."""
+    """Read the requested view tier from a subscribe payload. Defaults to 'render'
+    (the true mirror payload -- transforms + optional debug) -- 'qpos' only if
+    explicitly asked."""
     try:
         req = msgpack.unpackb(bytes(payload), raw=False, strict_map_key=False) or {}
-        return "qpos" if str(req.get("format", "")).lower() == "qpos" else "transforms"
+        return "qpos" if str(req.get("format", "")).lower() == "qpos" else "render"
     except Exception:  # noqa: BLE001
-        return "transforms"
+        return "render"
 
 
 class _OwnerServicer:
@@ -90,13 +91,14 @@ class _OwnerServicer:
                         {"ok": False, "error": "capability disabled: stream_cameras"},
                         use_bin_type=True))
                     return
-                # Format: "transforms" (true mirror -- bxpos/bxquat, viewer runs no
-                # MuJoCo) or "qpos" ({t,qpos,qvel}). subscribe_viewer == qpos.
+                # Tier: "render" (true mirror -- bxpos/bxquat + optional debug,
+                # viewer runs no MuJoCo) or "qpos" ({t,qpos,qvel}).
+                # subscribe_viewer == qpos.
                 fmt = "qpos" if op == "subscribe_viewer" else _req_format(pkt.payload)
                 # This stream is dedicated to the subscription; stream frames until
                 # the client goes away, then end (don't read further requests).
-                if fmt == "transforms":
-                    yield from self._stream_transforms(context, pkt.sequence_id)
+                if fmt == "render":
+                    yield from self._stream_render(context, pkt.sequence_id)
                 else:
                     yield from self._stream_viewer(context, pkt.sequence_id)
                 return
@@ -167,10 +169,11 @@ class _OwnerServicer:
                 yield self._wrap("viewer_frame", seq, payload)
             time.sleep(self._stream_poll_s)
 
-    def _stream_transforms(self, context, seq: int):
-        # Transform view (format=transforms): the true mirror payload -- per-body
-        # bxpos/bxquat (+ optional camera transforms). The viewer applies them
-        # directly and runs zero MuJoCo. Same frames a ZMQ 'geoms' subscriber gets.
+    def _stream_render(self, context, seq: int):
+        # Render tier (format=render): the true mirror payload -- per-body
+        # bxpos/bxquat (+ optional camera transforms + optional debug fields). The
+        # viewer applies them directly and runs zero MuJoCo. Same frames a ZMQ
+        # 'render' subscriber gets.
         last_f = None
         while context.is_active():
             fr = self._owner.latest_transforms()
