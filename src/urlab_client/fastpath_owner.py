@@ -170,7 +170,6 @@ class FastPathOwner:
         self._pert = None          # mujoco.MjvPerturb
         self._pert_scene = None    # throwaway mjvScene (only pert.scale uses it)
         self._pert_sel = None      # body id localmass was last initialised for
-        self._latest_state: "Optional[tuple[float, list, list]]" = None
         # Latest per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?}) cached
         # for a gRPC subscribe(format=render) stream -- the true mirror payload
         # (viewer runs zero MuJoCo). Written by every publish_bodies/publish_mjdata.
@@ -432,12 +431,6 @@ class FastPathOwner:
         pert.refselpos[:] = intent["refselpos"]
         mujoco.mjv_applyPerturbForce(model, data, pert)
 
-    def latest_state(self) -> "Optional[tuple[float, list, list]]":
-        """The most recent ``(t, qpos, qvel)`` given to :meth:`publish_state`, or
-        None. Read by a gRPC subscribe(format=qpos) stream; thread-safe."""
-        with self._lock:
-            return self._latest_state
-
     def latest_transforms(self) -> "Optional[dict]":
         """The most recent per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?})
         published via :meth:`publish_bodies`/:meth:`publish_mjdata`, or None. Read by
@@ -543,30 +536,9 @@ class FastPathOwner:
             {"f": int(frame), "xpos": list(xpos), "xquat": list(xquat)}, cxpos, cxquat
         )
 
-    def publish_state(self, t: float, qpos, qvel) -> None:
-        """Broadcast raw kinematics ``{t, qpos, qvel}`` on the ``viewer`` topic for
-        read-only viewers -- a mujoco/pystudio peek window or a UE viewer instance.
-
-        This is the smooth async channel, separate from the eval render path, and
-        uses the exact wire format UE's ViewerSubscribeTransport consumes, so the
-        same bus feeds a Python peek and a UE viewer alike. Best-effort: a slow or
-        absent subscriber never stalls the sim."""
-        qpos_l = [float(x) for x in qpos]
-        qvel_l = [float(x) for x in qvel]
-        with self._lock:
-            self._latest_state = (float(t), qpos_l, qvel_l)  # for the gRPC stream
-        payload = {"t": float(t), "qpos": qpos_l, "qvel": qvel_l}
-        try:
-            self._pub.send_multipart(
-                [b"viewer", msgpack.packb(payload, use_bin_type=True)],
-                flags=zmq.NOBLOCK,
-            )
-        except zmq.ZMQError:
-            pass
-
     # -- optional gRPC face ------------------------------------------------- #
     def start_grpc_server(self, port: int = 50051, bind: str = "0.0.0.0") -> str:
-        """Serve this owner over gRPC too (viewers subscribe + perturb over gRPC,
+        """Serve this owner over gRPC too (mirrors subscribe + perturb over gRPC,
         not just ZMQ). Returns the ``host:port`` it listens on. Idempotent."""
         if self._grpc_server is not None:
             return self._grpc_server.endpoint

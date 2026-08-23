@@ -84,7 +84,6 @@ from .render_pool import (
     RenderPoolError,
     parse_endpoints,
 )
-from .peek import PeekViewer
 from .session import OwnerInfo, discover_owners
 from .enums import (
     ActuatorType,
@@ -162,8 +161,6 @@ __all__ = [
     "InstanceSpec",
     "RenderPoolError",
     "parse_endpoints",
-    # live peek viewer (attach + push)
-    "PeekViewer",
     # session discovery / join
     "OwnerInfo",
     "discover_owners",

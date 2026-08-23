@@ -63,7 +63,7 @@ def main() -> None:
     try:
         with mujoco.viewer.launch_passive(model, data) as viewer:
             while viewer.is_running():
-                # peek viewers push a drag INTENT (accept_input); the owner runs the
+                # mirrors push a drag INTENT (accept_input); the owner runs the
                 # real mjv_applyPerturbForce -- mass-scaled + critically damped, like
                 # simulate's Ctrl-drag. Zero first, then let it (re)write the wrench.
                 data.xfrc_applied[:] = 0.0
@@ -73,7 +73,6 @@ def main() -> None:
                 mujoco.mj_step(model, data)
                 owner.serve_pending()                          # zmq control (best-effort)
                 owner.publish_mjdata(frame, model, data)       # transform stream (mirror)
-                owner.publish_state(data.time, data.qpos, data.qvel)  # qpos stream (python peek)
                 viewer.sync()
                 frame += 1
                 time.sleep(model.opt.timestep)

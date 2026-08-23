@@ -169,50 +169,16 @@ class Transport(ABC):
     def close(self) -> None:
         """Stop all streams and close the RPC channel. Idempotent."""
 
-    # -- viewer bus (owner -> viewers) ------------------------------------
-    # The owner of the simulation (the puppet client here) broadcasts one raw
-    # kinematics frame per step onto a PUB socket that any number of read-only
-    # viewers subscribe to. Default no-ops so a transport that has no viewer
-    # PUB (SHM, in-process) is safe to call unconditionally; ZmqTransport
-    # overrides them.
-
-    def enable_viewer_broadcast(self, port: int) -> Optional[str]:
-        """Bind the viewer PUB on ``port`` and return its endpoint, or None if
-        this transport cannot broadcast. Idempotent."""
-        return None
-
-    def publish_viewer_state(self, payload: Mapping[str, Any]) -> None:
-        """Broadcast one owner-authored frame (``{t, qpos, qvel}``) to viewers.
-        No-op until :meth:`enable_viewer_broadcast` has bound the PUB."""
-        return None
+    # -- render bus (owner -> fast-path renderers) ------------------------
+    # The owner broadcasts one render-tier frame per step onto a PUB socket that
+    # fast-path renderers subscribe to. Default no-op so a transport that has no
+    # render PUB (SHM, in-process) is safe to call unconditionally; ZmqTransport
+    # overrides it. (The qpos viewer tier was removed in Phase 3.2.)
 
     def publish_geoms(self, payload: Mapping[str, Any]) -> None:
         """Broadcast one render-tier frame (per-body transforms + optional debug
         fields) to fast-path renderers on topic ``render``. No-op until the PUB is
         bound."""
-        return None
-
-    # -- viewer bus consumer (a viewer subscribes to an owner) ------------
-    # The read-side symmetric to publish_viewer_state: a peek/viewer subscribes
-    # to an owner's {t,qpos,qvel} stream. Transport-agnostic -- ZMQ subscribes the
-    # "viewer" PUB, gRPC opens a subscribe_viewer stream, etc. Base raises so an
-    # unsupported transport fails loudly rather than silently rendering nothing.
-
-    def start_viewer_stream(
-        self,
-        on_frame: SnapshotCallback,
-        *,
-        endpoint: Optional[str] = None,
-    ) -> None:
-        """Subscribe to an owner's viewer bus. ``on_frame`` receives each decoded
-        ``{t, qpos, qvel}`` mapping on a worker thread. ``endpoint`` is the owner's
-        viewer PUB (``tcp://host:port``) for transports that dial a separate address
-        (ZMQ); transports that stream over their own channel (gRPC) ignore it.
-        Idempotent."""
-        raise NotImplementedError(f"{type(self).__name__} has no viewer stream")
-
-    def stop_viewer_stream(self) -> None:
-        """Tear down the viewer stream. Idempotent."""
         return None
 
 

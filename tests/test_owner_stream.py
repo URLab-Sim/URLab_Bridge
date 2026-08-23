@@ -1,8 +1,10 @@
 # Copyright (c) 2026 Jonathan Embley-Riches. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
-"""Peek viewer wire tests: viewer-frame decode, perturb request shape, and a real
-ZMQ round-trip of FastPathOwner.publish_state on the "viewer" topic (the contract
-UE's ViewerSubscribeTransport also speaks). No mujoco, no GUI."""
+"""Owner stream + perturb wire tests: the surviving render tier (subscribe
+(format=render) transform round-trip over gRPC) and the owner's fastpath_perturb
+handling. The qpos render tier and the Python peek viewer were removed in Phase
+3.2/3.3, so those tests (viewer-frame decode, publish_state / start_viewer_stream
+round-trips, subscribe_viewer) are gone with them. No mujoco, no GUI."""
 from __future__ import annotations
 
 import socket
@@ -11,8 +13,6 @@ import time
 import msgpack
 import pytest
 import zmq
-
-from urlab_client.peek import VIEWER_TOPIC, decode_viewer_frame, perturb_request
 
 
 def _free_port() -> int:
@@ -23,133 +23,13 @@ def _free_port() -> int:
     return port
 
 
-def test_decode_roundtrip():
-    payload = msgpack.packb({"t": 1.5, "qpos": [1, 2, 3], "qvel": [0.1, 0.2]},
-                            use_bin_type=True)
-    t, qpos, qvel = decode_viewer_frame(payload)
-    assert t == 1.5
-    assert list(qpos) == [1, 2, 3]
-    assert list(qvel) == [0.1, 0.2]
-
-
-def test_decode_rejects_bad():
-    assert decode_viewer_frame(msgpack.packb({"t": 0}, use_bin_type=True)) is None
-    assert decode_viewer_frame(b"\xff\xff\xff") is None
-
-
-def test_perturb_request_shape():
-    assert perturb_request(3, [1, 2, 3], [4, 5, 6]) == {
-        "op": "fastpath_perturb", "body": 3,
-        "force": [1.0, 2.0, 3.0], "torque": [4.0, 5.0, 6.0],
+def perturb_request(body: int, force, torque) -> dict:
+    """The exact-wrench perturb request the owner accepts over the control channel
+    (formerly urlab_client.peek.perturb_request; inlined after peek's removal)."""
+    return {
+        "op": "fastpath_perturb", "body": int(body),
+        "force": [float(x) for x in force], "torque": [float(x) for x in torque],
     }
-
-
-def test_owner_publish_state_roundtrip(tmp_path):
-    """A FastPathOwner.publish_state frame is received + decoded on the viewer bus."""
-    from urlab_client.fastpath_owner import FastPathOwner
-
-    owner = FastPathOwner(
-        b"", scene="t", control_port=_free_port(), bus_port=_free_port(),
-        advertise_host="127.0.0.1", registry_dir=str(tmp_path),
-    )
-    try:
-        sub = zmq.Context.instance().socket(zmq.SUB)
-        sub.setsockopt(zmq.SUBSCRIBE, VIEWER_TOPIC)
-        sub.setsockopt(zmq.RCVTIMEO, 200)
-        sub.connect(owner.bus_endpoint)
-
-        got = None
-        for _ in range(100):  # PUB/SUB slow-joiner: publish until the SUB is attached
-            owner.publish_state(2.0, [1.0, 2.0], [0.5])
-            try:
-                parts = sub.recv_multipart()
-            except zmq.error.Again:
-                time.sleep(0.02)
-                continue
-            assert parts[0] == VIEWER_TOPIC
-            got = decode_viewer_frame(parts[-1])
-            break
-        sub.close(0)
-
-        assert got is not None, "no viewer frame received"
-        t, qpos, qvel = got
-        assert t == 2.0
-        assert list(qpos) == [1.0, 2.0]
-        assert list(qvel) == [0.5]
-    finally:
-        owner.close()
-
-
-def test_transport_viewer_stream_roundtrip(tmp_path):
-    """ZmqTransport.start_viewer_stream receives frames an owner publish_states."""
-    import queue
-
-    from urlab_client.fastpath_owner import FastPathOwner
-    from urlab_client.transports import make_transport
-
-    ctrl_port, bus_port = _free_port(), _free_port()
-    owner = FastPathOwner(
-        b"", scene="t", control_port=ctrl_port, bus_port=bus_port,
-        advertise_host="127.0.0.1", registry_dir=str(tmp_path),
-    )
-    t = make_transport("zmq", address="tcp://127.0.0.1", step_port=ctrl_port)
-    got: "queue.Queue" = queue.Queue()
-    try:
-        t.start_viewer_stream(lambda f: got.put(f), endpoint=owner.bus_endpoint)
-        frame = None
-        for _ in range(100):  # slow-joiner: publish until the SUB attaches
-            owner.publish_state(3.0, [1.0, 2.0], [0.5])
-            try:
-                frame = got.get(timeout=0.05)
-                break
-            except queue.Empty:
-                continue
-        assert frame is not None, "no viewer frame delivered to the transport stream"
-        assert list(frame["qpos"]) == [1.0, 2.0]
-        assert frame["t"] == 3.0
-    finally:
-        t.close()
-        owner.close()
-
-
-def test_grpc_owner_stream_and_perturb(tmp_path):
-    """The Python owner gRPC server: subscribe_viewer streams {t,qpos,qvel} and
-    fastpath_perturb accumulates -- both driven through GrpcTransport."""
-    import queue
-
-    from urlab_client.fastpath_owner import FastPathOwner
-    from urlab_client.peek import perturb_request
-    from urlab_client.transports import make_transport
-
-    grpc_port = _free_port()
-    owner = FastPathOwner(
-        b"", scene="t", control_port=_free_port(), bus_port=_free_port(),
-        advertise_host="127.0.0.1", registry_dir=str(tmp_path),
-    )
-    owner.start_grpc_server(port=grpc_port)
-    t = make_transport("grpc", address="127.0.0.1", step_port=grpc_port,
-                       recv_timeout_ms=3000)
-    got: "queue.Queue" = queue.Queue()
-    try:
-        t.start_viewer_stream(lambda f: got.put(f))
-        frame = None
-        for i in range(200):  # keep publishing new frames until one is streamed back
-            owner.publish_state(5.0 + i * 0.01, [1.0, 2.0, 3.0], [0.0])
-            try:
-                frame = got.get(timeout=0.05)
-                break
-            except queue.Empty:
-                continue
-        assert frame is not None, "no viewer frame streamed over gRPC"
-        assert list(frame["qpos"]) == [1.0, 2.0, 3.0]
-
-        reply = t.rpc(perturb_request(2, [1.0, 0.0, 0.0], [0.0, 0.0, 0.5]),
-                      recv_timeout_ms=3000)
-        assert reply.get("ok") is True
-        assert owner.drain_perturbations() == {2: [1.0, 0.0, 0.0, 0.0, 0.0, 0.5]}
-    finally:
-        t.close()
-        owner.close()
 
 
 def test_grpc_owner_transform_stream_and_hello(tmp_path):
@@ -243,9 +123,9 @@ def test_readonly_owner_refuses_perturb(tmp_path):
         owner.close()
 
 
-def test_owner_accepts_peek_perturb(tmp_path):
-    """A peek's perturb_request over the control channel is accepted + drained --
-    the push-back half of the loop, end to end at the wire level."""
+def test_owner_accepts_perturb(tmp_path):
+    """An exact-wrench perturb_request over the control channel is accepted +
+    drained -- the push-back half of the loop, end to end at the wire level."""
     from urlab_client.fastpath_owner import FastPathOwner
 
     owner = FastPathOwner(

@@ -16,25 +16,25 @@
 
 A UE instance is already a gRPC server; a Python owner is normally a gRPC
 *client*. This embeds a small ``dm_env_rpc`` gRPC server in a Python owner so
-viewers can subscribe + perturb over gRPC too -- one transport everywhere, not
+mirrors can subscribe + perturb over gRPC too -- one transport everywhere, not
 just ZMQ. It speaks the exact same envelope as the UE bridge: a ``UrlabPacket``
 (``op``, ``payload`` msgpack, ``sequence_id``) inside ``EnvironmentRequest/
 Response.extension``.
 
-Ops served (peek/viewer/VR are capability *consumers*, not modes):
+Ops served (mirror/VR are capability *consumers*, not modes):
 - ``fastpath_hello`` -- scene/ngeom, the advertised capabilities, and the model
   bytes + format (``xml``/``mjz``/``mjb``; xml/mjz are decoded in-engine, so a
   mirror needs no MJB version match).
-- ``subscribe`` -- gated on the ``stream_cameras`` capability; a server-stream of
-  the owner's view. ``format`` selects the tier: ``render`` (the true mirror --
-  per-body ``bxpos``/``bxquat`` + optional debug fields, consumer runs zero
-  MuJoCo; op ``view_frame``) or ``qpos`` (``{t,qpos,qvel}``; op ``viewer_frame``).
-  ``subscribe_viewer`` is the back-compat alias for ``format=qpos``.
+- ``subscribe`` (``format=render``) -- gated on the ``stream_cameras`` capability;
+  a server-stream of the render tier (the true mirror -- per-body
+  ``bxpos``/``bxquat`` + optional debug fields, consumer runs zero MuJoCo; op
+  ``view_frame``). The qpos render tier (``subscribe_viewer`` / ``format=qpos``)
+  was removed in Phase 3.2.
 - ``fastpath_perturb`` -- gated on the ``accept_input`` capability; into the
   owner's perturb queue.
 
 Started via ``FastPathOwner.start_grpc_server()``. The same contract is served by
-a UE owner, so a viewer is owner-agnostic.
+a UE owner, so a mirror is owner-agnostic.
 """
 from __future__ import annotations
 
@@ -55,17 +55,6 @@ def _pb():
     return dm_env_rpc_pb2, dm_env_rpc_pb2_grpc, urlab_dm_env_rpc_pb2
 
 
-def _req_format(payload: bytes) -> str:
-    """Read the requested view tier from a subscribe payload. Defaults to 'render'
-    (the true mirror payload -- transforms + optional debug) -- 'qpos' only if
-    explicitly asked."""
-    try:
-        req = msgpack.unpackb(bytes(payload), raw=False, strict_map_key=False) or {}
-        return "qpos" if str(req.get("format", "")).lower() == "qpos" else "render"
-    except Exception:  # noqa: BLE001
-        return "render"
-
-
 class _OwnerServicer:
     """dm_env EnvironmentServicer (duck-typed -- add_EnvironmentServicer_to_server
     only reads ``.Process``, so no base class import is needed)."""
@@ -83,24 +72,20 @@ class _OwnerServicer:
             if not env_req.extension.Unpack(pkt):
                 continue
             op = pkt.op
-            if op in ("subscribe", "subscribe_viewer"):
+            if op == "subscribe":
                 # Subscribing to the owner's view is gated on the stream_cameras
-                # capability (peek/viewer/VR are consumers of that cap, not modes).
+                # capability (mirror/VR are consumers of that cap, not modes).
                 if not self._owner.streams_view:
                     yield self._wrap(op, pkt.sequence_id, msgpack.packb(
                         {"ok": False, "error": "capability disabled: stream_cameras"},
                         use_bin_type=True))
                     return
-                # Tier: "render" (true mirror -- bxpos/bxquat + optional debug,
-                # viewer runs no MuJoCo) or "qpos" ({t,qpos,qvel}).
-                # subscribe_viewer == qpos.
-                fmt = "qpos" if op == "subscribe_viewer" else _req_format(pkt.payload)
-                # This stream is dedicated to the subscription; stream frames until
-                # the client goes away, then end (don't read further requests).
-                if fmt == "render":
-                    yield from self._stream_render(context, pkt.sequence_id)
-                else:
-                    yield from self._stream_viewer(context, pkt.sequence_id)
+                # The one surviving tier is "render" (true mirror -- bxpos/bxquat +
+                # optional debug, viewer runs no MuJoCo). The qpos tier was removed
+                # in Phase 3.2. This stream is dedicated to the subscription; stream
+                # frames until the client goes away, then end (don't read further
+                # requests).
+                yield from self._stream_render(context, pkt.sequence_id)
                 return
             reply = self._dispatch(op, bytes(pkt.payload))
             yield self._wrap(op, pkt.sequence_id, reply)
@@ -155,19 +140,6 @@ class _OwnerServicer:
             return msgpack.packb(reply, use_bin_type=True)
         return msgpack.packb(
             {"ok": False, "error": f"unknown op {op!r}"}, use_bin_type=True)
-
-    def _stream_viewer(self, context, seq: int):
-        # qpos view (format=qpos / subscribe_viewer): consumer runs its own FK.
-        last_t = None
-        while context.is_active():
-            st = self._owner.latest_state()
-            if st is not None and st[0] != last_t:
-                last_t = st[0]
-                t, qpos, qvel = st
-                payload = msgpack.packb(
-                    {"t": t, "qpos": qpos, "qvel": qvel}, use_bin_type=True)
-                yield self._wrap("viewer_frame", seq, payload)
-            time.sleep(self._stream_poll_s)
 
     def _stream_render(self, context, seq: int):
         # Render tier (format=render): the true mirror payload -- per-body

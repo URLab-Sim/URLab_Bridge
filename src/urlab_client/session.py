@@ -234,11 +234,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     pl.add_argument("--all", action="store_true",
                     help="include dead-pid ghosts (default: hide + prune them)")
 
-    pj = sub.add_parser("join", help="join an owner as a viewer or VR")
+    pj = sub.add_parser("join", help="join an owner as a VR mirror")
     _common(pj)
     pj.add_argument("target", help="instance id / host / host:port")
     pj.add_argument("--model", required=True, help="scene xml/mjb the owner runs")
-    pj.add_argument("--mode", choices=["viewer", "vr"], default="viewer")
+    # The old Python "viewer" (peek) mode was removed in Phase 3.3; a desktop mirror
+    # is now an ordinary UE transform-mirror renderer. Only VR join remains.
+    pj.add_argument("--mode", choices=["vr"], default="vr")
     pj.add_argument("--transport", choices=["zmq", "grpc"], default=None,
                     help="default: what the owner advertises")
 
@@ -254,22 +256,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if owner is None:
         print(f"no owner matched {args.target!r}; try 'session list'")
         return 1
-    transport = args.transport or owner.default_transport()
 
-    if args.mode == "vr":
-        return _join_vr(owner)
-
-    # viewer: attach a Python peek over the chosen transport
-    from .peek import PeekViewer
-
-    control = owner.endpoint_for(transport)
-    bus = owner.bus if transport == "zmq" else None
-    if transport == "zmq" and not control:
-        print("owner advertises no ZMQ control endpoint; try --transport grpc")
-        return 1
-    print(f"joining {owner.instance_id} ({owner.host}) as viewer over {transport}")
-    PeekViewer(args.model, control=control, bus=bus, transport=transport).run()
-    return 0
+    return _join_vr(owner)
 
 
 def _join_vr(owner: OwnerInfo) -> int:

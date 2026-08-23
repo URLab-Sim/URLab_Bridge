@@ -79,13 +79,9 @@ class ZmqTransport(Transport):
         self._cam_threads: Dict[Tuple[str, str], threading.Thread] = {}
         self._cam_stops: Dict[Tuple[str, str], threading.Event] = {}
 
-        # Viewer bus: a PUB the owner binds so read-only viewers can subscribe
-        # to raw kinematics. Lazily bound by enable_viewer_broadcast().
+        # Render bus PUB (per-body transforms + optional debug fields), shared by
+        # publish_geoms. The qpos viewer tier was removed (Phase 3.2).
         self._viewer_pub: Any = None
-        self._viewer_endpoint: Optional[str] = None
-        # Viewer bus SUBSCRIBER (the read side, for a peek/viewer).
-        self._viewer_sub_stop: Optional[threading.Event] = None
-        self._viewer_sub_thread: Optional[threading.Thread] = None
 
     # -- RPC --------------------------------------------------------------
 
@@ -254,79 +250,6 @@ class ZmqTransport(Transport):
             backoff = min(backoff * 2.0, _STREAM_RECONNECT_MAX_S)
         logger.debug("ZmqTransport state stream loop exited")
 
-    # -- viewer bus consumer ----------------------------------------------
-
-    def start_viewer_stream(self, on_frame, *, endpoint=None) -> None:
-        if self._viewer_sub_thread is not None and self._viewer_sub_thread.is_alive():
-            return
-        ep = endpoint or self._viewer_endpoint
-        if not ep:
-            raise ValueError(
-                "start_viewer_stream needs an owner viewer endpoint (tcp://host:port)")
-        self._viewer_sub_stop = threading.Event()
-        self._viewer_sub_thread = threading.Thread(
-            target=self._viewer_loop, args=(on_frame, ep),
-            name="URLabViewerSub", daemon=True,
-        )
-        self._viewer_sub_thread.start()
-
-    def stop_viewer_stream(self) -> None:
-        if self._viewer_sub_stop is not None:
-            self._viewer_sub_stop.set()
-        if self._viewer_sub_thread is not None:
-            self._viewer_sub_thread.join(timeout=5.0)
-            self._viewer_sub_thread = None
-        self._viewer_sub_stop = None
-
-    def _viewer_loop(self, on_frame, endpoint: str) -> None:
-        # Mirrors _state_loop but subscribes the owner's viewer PUB (topic
-        # "viewer", {t,qpos,qvel}) instead of the server state/full snapshot.
-        if zmq is None or msgpack is None:
-            return
-        assert self._viewer_sub_stop is not None
-        if self._ctx is None:
-            self._ctx = zmq.Context()
-        backoff = _STREAM_RECONNECT_MIN_S
-        while not self._viewer_sub_stop.is_set():
-            sock = self._ctx.socket(zmq.SUB)
-            sock.setsockopt(zmq.LINGER, 0)
-            try:
-                sock.connect(endpoint)
-                sock.setsockopt(zmq.SUBSCRIBE, self._VIEWER_TOPIC)
-                sock.setsockopt(zmq.RCVTIMEO, 200)
-                while not self._viewer_sub_stop.is_set():
-                    try:
-                        parts = sock.recv_multipart()
-                    except zmq.Again:
-                        continue
-                    backoff = _STREAM_RECONNECT_MIN_S
-                    if len(parts) < 2:
-                        continue
-                    try:
-                        frame = msgpack.unpackb(
-                            parts[-1], raw=False, strict_map_key=False)
-                    except Exception as exc:
-                        logger.debug("viewer frame decode failed: %s", exc)
-                        continue
-                    try:
-                        on_frame(frame)
-                    except Exception as exc:  # pragma: no cover - callback-defensive
-                        logger.debug("viewer frame callback raised: %s", exc)
-            except Exception as exc:
-                logger.warning(
-                    "ZmqTransport viewer stream error (%s); reconnecting in %.2fs",
-                    exc, backoff)
-            finally:
-                try:
-                    sock.close(linger=0)
-                except Exception:
-                    pass
-            if self._viewer_sub_stop.is_set():
-                break
-            self._viewer_sub_stop.wait(backoff)
-            backoff = min(backoff * 2.0, _STREAM_RECONNECT_MAX_S)
-        logger.debug("ZmqTransport viewer stream loop exited")
-
     # -- camera streams ---------------------------------------------------
 
     def start_camera_stream(
@@ -434,48 +357,9 @@ class ZmqTransport(Transport):
             backoff = min(backoff * 2.0, _STREAM_RECONNECT_MAX_S)
         logger.debug("ZmqTransport camera %s/%s stream loop exited", key[0], key[1])
 
-    # -- viewer bus (owner -> viewers) ------------------------------------
+    # -- render bus (owner -> fast-path renderers) ------------------------
 
-    # Topic every viewer subscribes to. A bare prefix keeps the wire format
-    # trivial: [topic, msgpack({"t","qpos","qvel"})].
-    _VIEWER_TOPIC = b"viewer"
     _RENDER_TOPIC = b"render"
-
-    def enable_viewer_broadcast(self, port: int) -> Optional[str]:
-        if zmq is None:
-            raise RuntimeError("pyzmq not installed; cannot broadcast")
-        if msgpack is None:
-            raise RuntimeError("msgpack not installed; cannot broadcast")
-        with self._sock_lock:
-            if self._viewer_pub is not None:
-                return self._viewer_endpoint
-            if self._ctx is None:
-                self._ctx = zmq.Context()
-            pub = self._ctx.socket(zmq.PUB)
-            pub.setsockopt(zmq.LINGER, 0)
-            # Bind on every interface so a viewer on another host can reach it;
-            # the owner advertises its own reachable address out of band.
-            endpoint = f"tcp://0.0.0.0:{port}"
-            pub.bind(endpoint)
-            self._viewer_pub = pub
-            self._viewer_endpoint = endpoint
-            logger.info("ZmqTransport viewer PUB bound to %s", endpoint)
-            return endpoint
-
-    def publish_viewer_state(self, payload: Mapping[str, Any]) -> None:
-        # Called once per owner step; drop silently if not enabled so callers
-        # need no guard. PUB.send never blocks (it discards with no subscriber).
-        with self._sock_lock:
-            pub = self._viewer_pub
-            if pub is None:
-                return
-            try:
-                pub.send_multipart(
-                    [self._VIEWER_TOPIC, msgpack.packb(dict(payload), use_bin_type=True)],
-                    flags=zmq.NOBLOCK,
-                )
-            except Exception as exc:  # pragma: no cover - best-effort broadcast
-                logger.debug("viewer publish dropped: %s", exc)
 
     def publish_geoms(self, payload: Mapping[str, Any]) -> None:
         # The render tier (per-body transforms + optional debug fields) for fast-path
@@ -499,7 +383,6 @@ class ZmqTransport(Transport):
         # REQ socket, then term the context. Reverse ordering races
         # libzmq's signaler (WSAECONNRESET on Windows).
         self.stop_state_stream()
-        self.stop_viewer_stream()
         self.stop_camera_streams()
         with self._sock_lock:
             if self._socket is not None:

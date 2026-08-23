@@ -116,11 +116,6 @@ class GrpcTransport(Transport):
         self._recv_exec = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="URLabDmEnvRecv"
         )
-        # Viewer subscription: its OWN channel + Process call (a dedicated
-        # server-stream), independent of the rpc stream + lock so it runs
-        # concurrently with blocking renders/perturbs.
-        self._viewer_stop: Optional[threading.Event] = None
-        self._viewer_thread: Optional[threading.Thread] = None
 
     # -- stream setup ------------------------------------------------------
     def _ensure_stream(self) -> None:
@@ -289,97 +284,6 @@ class GrpcTransport(Transport):
         )
         old_exec.shutdown(wait=False)
 
-    # -- viewer subscription (server-stream over gRPC) --------------------
-    def start_viewer_stream(self, on_frame, *, endpoint=None) -> None:
-        if self._viewer_thread is not None and self._viewer_thread.is_alive():
-            return
-        self._viewer_stop = threading.Event()
-        self._viewer_thread = threading.Thread(
-            target=self._viewer_loop, args=(on_frame,),
-            name="URLabDmEnvViewerSub", daemon=True,
-        )
-        self._viewer_thread.start()
-
-    def stop_viewer_stream(self) -> None:
-        if self._viewer_stop is not None:
-            self._viewer_stop.set()
-        if self._viewer_thread is not None:
-            self._viewer_thread.join(timeout=5.0)
-            self._viewer_thread = None
-        self._viewer_stop = None
-
-    def _viewer_loop(self, on_frame) -> None:
-        # Its own channel + a dedicated Process call: send one subscribe_viewer
-        # request, keep the request stream open, and dispatch the server's
-        # streamed viewer_frame packets to on_frame. Independent of rpc()'s stream.
-        if msgpack is None:
-            return
-        # Capture the event locally: stop_viewer_stream() nulls self._viewer_stop
-        # after join, but the gRPC request-generator thread below outlives that, so
-        # it must not read the instance attribute.
-        stop = self._viewer_stop
-        if stop is None:
-            return
-        try:
-            import grpc  # type: ignore
-        except ImportError:  # pragma: no cover
-            return
-        # Use the module-level protobuf modules (dm_env_rpc.v1 with a bundled
-        # ._dmenv fallback, resolved once at import); bail cleanly if neither
-        # path resolved rather than raising on a None attribute mid-stream.
-        if dm_env_rpc_pb2 is None or dm_env_rpc_pb2_grpc is None or urlab_dm_env_rpc_pb2 is None:
-            return
-
-        backoff = 0.25
-        while not stop.is_set():
-            channel = None
-            try:
-                channel = grpc.insecure_channel(self._target, options=[
-                    ("grpc.max_send_message_length", -1),
-                    ("grpc.max_receive_message_length", -1),
-                ])
-                stub = dm_env_rpc_pb2_grpc.EnvironmentStub(channel)
-
-                def _req_gen():
-                    pkt = urlab_dm_env_rpc_pb2.UrlabPacket(
-                        op="subscribe_viewer", payload=b"", sequence_id=1)
-                    env = dm_env_rpc_pb2.EnvironmentRequest()
-                    env.extension.Pack(pkt)
-                    yield env
-                    while not stop.is_set():  # hold the stream open
-                        stop.wait(0.5)
-
-                for resp in stub.Process(_req_gen()):
-                    if stop.is_set():
-                        break
-                    backoff = 0.25
-                    if not resp.HasField("extension"):
-                        continue
-                    out = urlab_dm_env_rpc_pb2.UrlabPacket()
-                    if not resp.extension.Unpack(out) or out.op != "viewer_frame":
-                        continue
-                    try:
-                        frame = msgpack.unpackb(
-                            bytes(out.payload), raw=False, strict_map_key=False)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    try:
-                        on_frame(frame)
-                    except Exception:  # noqa: BLE001 - callback-defensive
-                        pass
-            except Exception:  # noqa: BLE001 - reconnect below
-                pass
-            finally:
-                if channel is not None:
-                    try:
-                        channel.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-            if stop.is_set():
-                break
-            stop.wait(backoff)
-            backoff = min(backoff * 2.0, 5.0)
-
     # -- streams (unsupported over dm_env_rpc here) ------------------------
     def start_state_stream(self, on_snapshot: SnapshotCallback) -> None:
         raise NotImplementedError(
@@ -403,7 +307,6 @@ class GrpcTransport(Transport):
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
-        self.stop_viewer_stream()
         with self._lock:
             try:
                 self._req_q.put_nowait(None)  # let the server's Read loop exit
