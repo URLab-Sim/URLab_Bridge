@@ -79,10 +79,6 @@ class ZmqTransport(Transport):
         self._cam_threads: Dict[Tuple[str, str], threading.Thread] = {}
         self._cam_stops: Dict[Tuple[str, str], threading.Event] = {}
 
-        # Render bus PUB (per-body transforms + optional debug fields), shared by
-        # publish_geoms. The qpos viewer tier was removed (Phase 3.2).
-        self._viewer_pub: Any = None
-
     # -- RPC --------------------------------------------------------------
 
     def _ensure_socket(self) -> None:
@@ -357,25 +353,6 @@ class ZmqTransport(Transport):
             backoff = min(backoff * 2.0, _STREAM_RECONNECT_MAX_S)
         logger.debug("ZmqTransport camera %s/%s stream loop exited", key[0], key[1])
 
-    # -- render bus (owner -> fast-path renderers) ------------------------
-
-    _RENDER_TOPIC = b"render"
-
-    def publish_geoms(self, payload: Mapping[str, Any]) -> None:
-        # The render tier (per-body transforms + optional debug fields) for fast-path
-        # renderers. Shares the viewer PUB socket, distinguished by the "render" topic.
-        with self._sock_lock:
-            pub = self._viewer_pub
-            if pub is None:
-                return
-            try:
-                pub.send_multipart(
-                    [self._RENDER_TOPIC, msgpack.packb(dict(payload), use_bin_type=True)],
-                    flags=zmq.NOBLOCK,
-                )
-            except Exception as exc:  # pragma: no cover - best-effort broadcast
-                logger.debug("render publish dropped: %s", exc)
-
     # -- lifecycle --------------------------------------------------------
 
     def close(self) -> None:
@@ -391,12 +368,6 @@ class ZmqTransport(Transport):
                 except Exception:
                     pass
             self._socket = None
-            if self._viewer_pub is not None:
-                try:
-                    self._viewer_pub.close(linger=0)
-                except Exception:
-                    pass
-                self._viewer_pub = None
             if self._ctx is not None:
                 try:
                     # destroy(linger=0) is idempotent and revokes any pending

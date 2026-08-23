@@ -169,18 +169,6 @@ class Transport(ABC):
     def close(self) -> None:
         """Stop all streams and close the RPC channel. Idempotent."""
 
-    # -- render bus (owner -> fast-path renderers) ------------------------
-    # The owner broadcasts one render-tier frame per step onto a PUB socket that
-    # fast-path renderers subscribe to. Default no-op so a transport that has no
-    # render PUB (SHM, in-process) is safe to call unconditionally; ZmqTransport
-    # overrides it. (The qpos viewer tier was removed in Phase 3.2.)
-
-    def publish_geoms(self, payload: Mapping[str, Any]) -> None:
-        """Broadcast one render-tier frame (per-body transforms + optional debug
-        fields) to fast-path renderers on topic ``render``. No-op until the PUB is
-        bound."""
-        return None
-
 
 def make_transport(
     name: str,

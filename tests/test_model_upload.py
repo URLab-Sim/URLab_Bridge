@@ -228,7 +228,7 @@ class _FakeRpc:
 
 def _make_client():
     # step_port=0: never connects; we drive it purely through the fake _rpc.
-    return URLabClient("tcp://127.0.0.1", step_mode="direct", step_port=0)
+    return URLabClient("tcp://127.0.0.1", step_mode="stepped", step_port=0)
 
 
 def _commit_ok():
@@ -278,7 +278,7 @@ def test_upload_model_full_sequence_sends_only_needed_blobs(tmp_path, monkeypatc
     manifest_call = fake.calls[0]
     asset_names = {a["name"] for a in manifest_call["assets"]}
     assert asset_names == {"base.obj", "wood.png"}
-    assert manifest_call["step_mode"] == "direct"
+    assert manifest_call["step_mode"] == "stepped"
     for a in manifest_call["assets"]:
         assert len(a["sha256"]) == 64
         assert a["size"] >= 0

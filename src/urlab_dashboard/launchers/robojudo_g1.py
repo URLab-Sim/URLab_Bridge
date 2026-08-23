@@ -131,12 +131,12 @@ def _make_launcher(key: str, cfg_name: str, policy_override: Optional[str],
         if client is None:
             raise RuntimeError("not connected")
 
-        # RoboJuDo pipelines step at fixed Hz; coerce the bridge into direct
+        # RoboJuDo pipelines step at fixed Hz; coerce the bridge into stepped
         # mode so the policy's expected decimation lines up. set_sim_options
         # is pushed AFTER pipeline construction below.
-        if step_mode_str != "direct" or client.step_mode.value != "direct":
-            client.runtime.set_mode("direct")
-            log(f"{key}: switched step mode to direct")
+        if step_mode_str != "stepped" or client.step_mode.value != "stepped":
+            client.runtime.set_mode("stepped")
+            log(f"{key}: switched step mode to stepped")
 
         # Resolve articulation prefix (auto when there's only one).
         if not art_prefix:
@@ -148,7 +148,7 @@ def _make_launcher(key: str, cfg_name: str, policy_override: Optional[str],
         # Build the env cfg, reusing the dashboard's URLabClient.
         EnvCfgCls = G1_29URLabRoboJuDoEnvCfg if dofs_29 else G1URLabRoboJuDoEnvCfg
         env_cfg = EnvCfgCls(
-            step_mode="direct",
+            step_mode="stepped",
             sim_dt=_DEFAULT_SIM_DT,
             sim_decimation=_DEFAULT_DECIMATION,
             articulation_prefix=art_prefix,

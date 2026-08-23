@@ -30,16 +30,15 @@ from typing import TypeVar, Union
 logger = logging.getLogger(__name__)
 
 
-class ControlMode(str, enum.Enum):
-    UE_CONTROLLER = "ue_controller"
-    RAW = "raw"
-
-
 class StepMode(str, enum.Enum):
-    LIVE = "live"
-    DIRECT = "direct"
-    PUPPET = "puppet"
-    AUTO = "auto"
+    """Producer step mode, mirroring UE's ``EMjStepMode``. The ``set_mode`` wire
+    token is the member's lowercase name. ``auto`` is deliberately absent: it is a
+    client-side policy (promote-on-connect), handled in ``URLabClient``, never a
+    wire value."""
+
+    FREERUN = "freerun"
+    STEPPED = "stepped"
+    STATEPUSHED = "statepushed"
 
 
 class ActuatorType(str, enum.Enum):
@@ -60,11 +59,6 @@ class ActuatorType(str, enum.Enum):
 class ControllerKind(str, enum.Enum):
     PD = "pd"
     PASSTHROUGH = "passthrough"
-
-
-class ControlSource(str, enum.Enum):
-    ZMQ = "zmq"
-    UI = "ui"
 
 
 class LightKind(str, enum.Enum):

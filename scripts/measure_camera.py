@@ -101,7 +101,7 @@ def main() -> int:
     client.model = m
     client.data = mujoco.MjData(m)
     client.local_model = False
-    client.runtime.set_mode("puppet")
+    client.runtime.set_mode("statepushed")
     client.warmup_cameras([cam], timeout_s=10.0)
 
     print(f"\n[2] End-to-end latency over {args.latency_steps} steps "

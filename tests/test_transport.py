@@ -31,7 +31,7 @@ from urlab_client.enums import StepMode
 from . import wire_replies as wr
 
 
-def _make_client(port: int, *, step_mode: str = "direct") -> URLabClient:
+def _make_client(port: int, *, step_mode: str = "stepped") -> URLabClient:
     return URLabClient(
         f"tcp://127.0.0.1",
         step_mode=step_mode,
@@ -85,7 +85,7 @@ def test_direct_step_sends_ctrl_and_absorbs_reply(mock_step_server, base_handsha
             "go2": wr.art_block(qpos=[0.0], qvel=[0.0], ctrl=[0.0]),
         },
     ))
-    client = _make_client(mock_step_server.port, step_mode="direct")
+    client = _make_client(mock_step_server.port, step_mode="stepped")
     try:
         client.connect()
         client.articulations["vx300s"].set_ctrl({"waist": 0.5})
@@ -129,7 +129,7 @@ def test_twist_and_clocks_roundtrip(mock_step_server, base_handshake):
             "go2": wr.art_block(qpos=[0.0], qvel=[0.0], ctrl=[0.0]),
         },
     ))
-    client = _make_client(mock_step_server.port, step_mode="direct")
+    client = _make_client(mock_step_server.port, step_mode="stepped")
     try:
         client.connect()
         client.step(n_steps=1)
@@ -194,16 +194,16 @@ def test_reset_round_trip(mock_step_server, base_handshake):
 def test_set_mode_rpc(mock_step_server, base_handshake):
     mock_step_server.replies.append(base_handshake)
     mock_step_server.replies.append(wr.set_mode_ok(
-        previous_mode="direct", current_mode="puppet"
+        previous_mode="stepped", current_mode="statepushed"
     ))
     client = _make_client(mock_step_server.port)
     try:
         client.connect()
-        current = client.runtime.set_mode("puppet")
+        current = client.runtime.set_mode("statepushed")
     finally:
         client.close()
-    assert current is StepMode.PUPPET
-    assert client.step_mode is StepMode.PUPPET
+    assert current is StepMode.STATEPUSHED
+    assert client.step_mode is StepMode.STATEPUSHED
 
 
 def test_configure_controller_rpc(mock_step_server, base_handshake):
@@ -384,7 +384,7 @@ def test_puppet_step_n_steps_calls_mj_step(
         base_handshake,
         wr.step_ok(time=0.005, step=5),
     ])
-    client = _make_client(mock_step_server.port, step_mode="puppet")
+    client = _make_client(mock_step_server.port, step_mode="statepushed")
     try:
         client.connect()
         # Drive a non-trivial state so mj_step has something to integrate
@@ -396,7 +396,7 @@ def test_puppet_step_n_steps_calls_mj_step(
         client.close()
     sent = mock_step_server.received[1]
     assert sent["op"] == "step"
-    assert sent["mode"] == "puppet"
+    assert sent["mode"] == "statepushed"
     assert sent["n_steps"] == 3
     assert "qpos" in sent and "qvel" in sent
 
@@ -410,7 +410,7 @@ def test_puppet_step_zero_does_not_call_mj_step(
         base_handshake,
         wr.step_ok(),
     ])
-    client = _make_client(mock_step_server.port, step_mode="puppet")
+    client = _make_client(mock_step_server.port, step_mode="statepushed")
     try:
         client.connect()
         # Set a recognisable state and confirm it survives (mj_step would integrate)
@@ -439,7 +439,7 @@ def test_step_reply_mirrors_state_into_local_mjdata_direct_mode(
             },
         ),
     ])
-    client = _make_client(mock_step_server.port, step_mode="direct")
+    client = _make_client(mock_step_server.port, step_mode="stepped")
     try:
         client.connect()
         client.step(n_steps=1)
@@ -470,7 +470,7 @@ def test_set_sim_options_returns_typed_simoptions(mock_step_server, base_handsha
             "solver": "newton",
         }),
     ])
-    client = _make_client(mock_step_server.port, step_mode="direct")
+    client = _make_client(mock_step_server.port, step_mode="stepped")
     try:
         client.connect()
         result = client.runtime.set_sim_options(timestep=0.002)
@@ -491,7 +491,7 @@ def test_set_sim_options_rejects_empty_call(mock_step_server, base_handshake):
     """set_sim_options() with no fields raises rather than sending an
     empty payload to the server."""
     mock_step_server.replies.append(base_handshake)
-    client = _make_client(mock_step_server.port, step_mode="direct")
+    client = _make_client(mock_step_server.port, step_mode="stepped")
     try:
         client.connect()
         with pytest.raises(ValueError, match="at least one field"):

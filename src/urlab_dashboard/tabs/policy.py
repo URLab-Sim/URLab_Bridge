@@ -28,7 +28,6 @@ import dearpygui.dearpygui as dpg
 
 from ..log import log
 from ..state import STATE
-from urlab_client.enums import StepMode
 from urlab_policy.registry import (
     POLICIES,
     check_step_mode_compatible,
@@ -168,9 +167,9 @@ def build(parent: str) -> None:
         dpg.add_separator()
 
         with dpg.group(horizontal=True):
-            dpg.add_combo(["auto", "live", "direct", "puppet"],
+            dpg.add_combo(["auto", "freerun", "stepped", "statepushed"],
                           label="Step mode", tag="policy_mode_combo",
-                          default_value="direct", width=140)
+                          default_value="stepped", width=140)
             dpg.add_combo([], label="Articulation",
                           tag="policy_art_combo", width=240)
 

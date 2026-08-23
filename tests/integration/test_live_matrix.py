@@ -53,12 +53,12 @@ _SHM_SKIP_REASON = (
 
 
 _MATRIX = [
-    ("zmq", StepMode.LIVE),
-    ("zmq", StepMode.DIRECT),
-    ("zmq", StepMode.PUPPET),
-    ("shm", StepMode.LIVE),
-    ("shm", StepMode.DIRECT),
-    ("shm", StepMode.PUPPET),
+    ("zmq", StepMode.FREERUN),
+    ("zmq", StepMode.STEPPED),
+    ("zmq", StepMode.STATEPUSHED),
+    ("shm", StepMode.FREERUN),
+    ("shm", StepMode.STEPPED),
+    ("shm", StepMode.STATEPUSHED),
 ]
 
 _IDS = [f"{t}-{m.value}" for (t, m) in _MATRIX]
@@ -90,8 +90,8 @@ def matrix_client(request, _live_session):
         # DIRECT / PUPPET have been set on the server. For LIVE we
         # explicitly demote so tests that ran before in DIRECT see
         # streaming come back up.
-        if mode == StepMode.LIVE and client.step_mode != StepMode.LIVE:
-            client.runtime.set_mode(StepMode.LIVE)
+        if mode == StepMode.FREERUN and client.step_mode != StepMode.FREERUN:
+            client.runtime.set_mode(StepMode.FREERUN)
             time.sleep(0.2)
         yield client
     finally:
@@ -116,7 +116,7 @@ def test_step_runs(matrix_client):
     # PUPPET steps push local mj_step state to the server; LIVE just
     # samples the latest snapshot; DIRECT runs mj_step on UE. All three
     # should accept n_steps=1 without raising.
-    if matrix_client.step_mode == StepMode.PUPPET and matrix_client.model is None:
+    if matrix_client.step_mode == StepMode.STATEPUSHED and matrix_client.model is None:
         pytest.skip("Puppet mode requires a local MJB-loaded MjModel")
     matrix_client.step(n_steps=1)
     art = next(iter(matrix_client.articulations.values()))

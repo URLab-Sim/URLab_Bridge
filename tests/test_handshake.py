@@ -28,19 +28,19 @@ from urlab_client import (
     URLabClient,
     URLabPDController,
 )
-from urlab_client.enums import ActuatorType, CameraMode, ControlMode
+from urlab_client.enums import ActuatorType, CameraMode
 
 
 @pytest.fixture
 def client(base_handshake):
-    c = URLabClient(step_mode="direct")
+    c = URLabClient(step_mode="stepped")
     c._apply_handshake(base_handshake)
     return c
 
 
 def test_client_normalises_step_mode_string():
-    assert URLabClient(step_mode="direct").step_mode.value == "direct"
-    assert URLabClient(step_mode="puppet").step_mode.value == "puppet"
+    assert URLabClient(step_mode="stepped").step_mode.value == "stepped"
+    assert URLabClient(step_mode="statepushed").step_mode.value == "statepushed"
 
 
 def test_handshake_populates_session_id_and_versions(client, base_handshake):
@@ -59,8 +59,8 @@ def test_handshake_builds_articulations_by_prefix(client):
     assert set(client.articulations.keys()) == {"vx300s", "go2"}
     vx = client.articulations["vx300s"]
     go2 = client.articulations["go2"]
-    assert vx.control_mode == ControlMode.UE_CONTROLLER
-    assert go2.control_mode == ControlMode.RAW
+    assert vx.control_mode == "ue_controller"
+    assert go2.control_mode == "raw"
 
 
 def test_articulation_groups_actuators_by_prefix(client):
@@ -198,7 +198,7 @@ def test_version_mismatch_warns_not_raises(base_handshake, caplog):
     # instead of raising URLabVersionMismatch.
     bad = dict(base_handshake)
     bad["mujoco_version"] = "99.99.99"
-    client = URLabClient(step_mode="direct", mujoco_version_check=True)
+    client = URLabClient(step_mode="stepped", mujoco_version_check=True)
     with caplog.at_level("WARNING", logger="urlab_client.client"):
         client._apply_handshake(bad)
     assert client.mujoco_version == "99.99.99"
@@ -210,7 +210,7 @@ def test_version_mismatch_warns_not_raises(base_handshake, caplog):
 def test_version_mismatch_bypass_is_silent(base_handshake, caplog):
     bad = dict(base_handshake)
     bad["mujoco_version"] = "99.99.99"
-    client = URLabClient(step_mode="direct", mujoco_version_check=False)
+    client = URLabClient(step_mode="stepped", mujoco_version_check=False)
     with caplog.at_level("WARNING", logger="urlab_client.client"):
         client._apply_handshake(bad)
     assert client.mujoco_version == "99.99.99"
@@ -238,7 +238,7 @@ def test_unloadable_mjb_falls_back_to_compiled_xml(base_handshake):
     bad = dict(base_handshake)
     bad["mjb"] = b"not an mjb"
     bad["mjcf_compiled"] = _FALLBACK_XML
-    client = URLabClient(step_mode="direct")
+    client = URLabClient(step_mode="stepped")
     client._apply_handshake(bad)
     assert client.model is not None
     assert client.model.nu == 1
@@ -256,7 +256,7 @@ def test_unloadable_mjb_without_xml_leaves_no_model_and_warns(
     bad = dict(base_handshake)
     bad["mjb"] = b"not an mjb"
     bad["manager_present"] = False
-    client = URLabClient(step_mode="direct")
+    client = URLabClient(step_mode="stepped")
     with caplog.at_level("WARNING", logger="urlab_client.client"):
         client._apply_handshake(bad)
     assert client.model is None

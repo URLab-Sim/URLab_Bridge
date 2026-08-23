@@ -111,7 +111,7 @@ def main() -> int:
     ap.add_argument("--host", default="tcp://127.0.0.1")
     ap.add_argument("--step-port", type=int, default=5559)
     ap.add_argument("--transport", choices=["zmq", "shm"], default="zmq")
-    ap.add_argument("--mode", choices=["puppet", "direct", "live"], default="puppet")
+    ap.add_argument("--mode", choices=["statepushed", "stepped", "freerun"], default="statepushed")
     ap.add_argument("--query", choices=["latest", "fresh"], default="latest")
     ap.add_argument("--camera-timeout", type=float, default=0.3)
     ap.add_argument("--rate", type=float, default=30.0,
@@ -153,7 +153,7 @@ def main() -> int:
 
     # Puppet needs a local model; load it and hand it to the client.
     model = data = None
-    if args.mode == "puppet" and not args.names_only:
+    if args.mode == "statepushed" and not args.names_only:
         if not args.local_xml:
             _log("ERROR: --mode puppet requires --local-xml (plain MJCF).")
             return 2
@@ -227,7 +227,7 @@ def main() -> int:
     t_start = time.time()
 
     for i in range(args.frames):
-        if args.mode == "puppet":
+        if args.mode == "statepushed":
             # Gentle motion so frames visibly change; tweak a couple of joints.
             import numpy as np
             data.qpos[:] = data.qpos  # keep current
@@ -238,7 +238,7 @@ def main() -> int:
 
         t0 = time.time()
         # step() is physics-only now; cameras are decoupled.
-        reply = client.step(n_steps=0 if args.mode == "puppet" else 1)
+        reply = client.step(n_steps=0 if args.mode == "statepushed" else 1)
         t1 = time.time()
 
         # Decoupled getter: ask for each camera's frame by canonical name.
@@ -283,7 +283,7 @@ def main() -> int:
         _log("\nLocked-down camera API (canonical names below):")
         _log(f"  client.runtime.set_mode({args.mode!r})")
         _log("  client.warmup_cameras()                 # block until every camera streams")
-        _log(f"  client.step(n_steps={'0' if args.mode=='puppet' else '1'})"
+        _log(f"  client.step(n_steps={'0' if args.mode=='statepushed' else '1'})"
              "                       # physics only; cameras are decoupled")
         _log(f"  img = client.get_camera({want[0]!r})")
         _log("  #   add fresh=True to sync the frame to the latest step's state")

@@ -34,7 +34,7 @@ def _make_discovered_client(port: int, mock_server, base_handshake) -> URLabClie
     mock_server.replies.append(base_handshake)
     client = URLabClient(
         "tcp://127.0.0.1",
-        step_mode="direct",
+        step_mode="stepped",
         step_port=port,
         recv_timeout_ms=2000,
         auto_promote_step_mode=False,

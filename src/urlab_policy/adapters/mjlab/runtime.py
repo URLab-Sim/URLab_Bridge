@@ -1343,7 +1343,7 @@ class MjlabRunner:
         from urlab_client import URLabClient, StepMode
         from urlab_policy.adapters.mjlab import MjlabRunner
 
-        client = URLabClient("tcp://localhost", step_mode=StepMode.DIRECT)
+        client = URLabClient("tcp://localhost", step_mode=StepMode.STEPPED)
         client.connect()
 
         runner = MjlabRunner(

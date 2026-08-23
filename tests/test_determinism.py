@@ -40,7 +40,7 @@ from urlab_policy.adapters.robojudo.env import URLabEnv  # noqa: E402
 def _client(port: int) -> URLabClient:
     return URLabClient(
         "tcp://127.0.0.1",
-        step_mode="direct",
+        step_mode="stepped",
         step_port=port,
         recv_timeout_ms=2000,
         auto_promote_step_mode=False,

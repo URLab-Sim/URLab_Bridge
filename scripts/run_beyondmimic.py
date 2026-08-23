@@ -74,8 +74,8 @@ def main() -> int:
                         help="URLab step-server address (default tcp://localhost)")
     parser.add_argument("--step-port", type=int, default=5559)
     parser.add_argument("--state-port", type=int, default=5555)
-    parser.add_argument("--step-mode", default="direct",
-                        choices=["direct", "live"],
+    parser.add_argument("--step-mode", default="stepped",
+                        choices=["stepped", "freerun"],
                         help="step mode (default: direct -- tightest "
                              "policy/physics coupling, recommended for "
                              "motion-tracking).")

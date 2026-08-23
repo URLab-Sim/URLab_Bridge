@@ -25,7 +25,7 @@ from urlab_client.enums import CameraMode
 
 
 def test_entity_from_handshake():
-    client = URLabClient(step_mode="direct")
+    client = URLabClient(step_mode="stepped")
     handshake = {
         "op": "hello_ok",
         "session_id": "s",
@@ -76,7 +76,7 @@ def test_articulations_appear_in_entities():
     """
     model = mujoco.MjModel.from_xml_string(mjcf)
     data = mujoco.MjData(model)
-    client = URLabClient(step_mode="direct")
+    client = URLabClient(step_mode="stepped")
     client.mujoco_version_check = False
     client.model = model
     client.data = data
@@ -111,7 +111,7 @@ def test_entity_root_pose_absorbs_from_step_reply():
     data = mujoco.MjData(model)
     pallet_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pallet")
 
-    client = URLabClient(step_mode="direct")
+    client = URLabClient(step_mode="stepped")
     client.mujoco_version_check = False
     client.model = model
     client.data = data
@@ -140,12 +140,12 @@ def test_entity_root_pose_absorbs_from_step_reply():
 
 
 def test_entity_apply_xfrc_in_puppet_warns():
-    client = URLabClient(step_mode="puppet")
+    client = URLabClient(step_mode="statepushed")
     entity = URLabEntity(name="pallet", body_id=5, has_free_base=False, client=client)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         entity.apply_xfrc(force=[1, 0, 0])
-    assert any("puppet mode" in str(x.message) for x in w)
+    assert any("statepushed mode" in str(x.message) for x in w)
 
 
 def test_camera_view_parses_mode_and_dtype():

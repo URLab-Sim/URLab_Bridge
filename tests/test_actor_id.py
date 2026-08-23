@@ -44,20 +44,20 @@ def handshake_with_ids(base_handshake):
 
 
 def test_actor_id_defaults_empty(handshake_no_ids):
-    c = URLabClient(step_mode="direct")
+    c = URLabClient(step_mode="stepped")
     c._apply_handshake(handshake_no_ids)
     for art in c.articulations.values():
         assert art.actor_id == ""
 
 
 def test_articulations_by_id_empty_without_ids(handshake_no_ids):
-    c = URLabClient(step_mode="direct")
+    c = URLabClient(step_mode="stepped")
     c._apply_handshake(handshake_no_ids)
     assert c.articulations_by_id == {}
 
 
 def test_actor_id_populates_field_and_index(handshake_with_ids):
-    c = URLabClient(step_mode="direct")
+    c = URLabClient(step_mode="stepped")
     c._apply_handshake(handshake_with_ids)
 
     vx = c.articulations["vx300s"]
@@ -75,7 +75,7 @@ def test_actor_id_populates_field_and_index(handshake_with_ids):
 def test_articulations_by_id_is_alias_not_copy(handshake_with_ids):
     """Looking up by id and by prefix yields the SAME URLabArticulation
     object — both maps point at the same wrappers, no shadow state."""
-    c = URLabClient(step_mode="direct")
+    c = URLabClient(step_mode="stepped")
     c._apply_handshake(handshake_with_ids)
     assert c.articulations_by_id["robot_a"] is c.articulations["vx300s"]
 
@@ -83,7 +83,7 @@ def test_articulations_by_id_is_alias_not_copy(handshake_with_ids):
 def test_apply_handshake_resets_articulations_by_id(handshake_with_ids):
     """A second discover should rebuild articulations_by_id from scratch
     (drop stale ids, pick up new ones)."""
-    c = URLabClient(step_mode="direct")
+    c = URLabClient(step_mode="stepped")
     c._apply_handshake(handshake_with_ids)
     assert "robot_a" in c.articulations_by_id
 

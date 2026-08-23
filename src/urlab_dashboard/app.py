@@ -254,7 +254,7 @@ def on_pause(_s=None, _a=None) -> None:
 def on_set_mode(_s=None, _a=None) -> None:
     if not _need_connection():
         return
-    mode_str = dpg.get_value("toolbar_mode_combo") or "live"
+    mode_str = dpg.get_value("toolbar_mode_combo") or "freerun"
     try:
         new = STATE.client.runtime.set_mode(mode_str)
         log(f"set_mode -> {new.value}")
@@ -430,9 +430,9 @@ def build_ui(initial_host: str, initial_port: int) -> None:
                                  callback=on_set_sim_speed,
                                  format="%.0f%%")
             dpg.add_text(" │ ", color=_DIM)
-            dpg.add_combo(["live", "direct", "puppet"],
+            dpg.add_combo(["freerun", "stepped", "statepushed"],
                           tag="toolbar_mode_combo",
-                          default_value="direct", width=130)
+                          default_value="stepped", width=130)
             dpg.add_button(label="Set mode", callback=on_set_mode)
         dpg.add_separator()
 
@@ -552,7 +552,7 @@ def main() -> None:
             if STATE.is_connected() and render_due:
                 # Free mode pulls latest snapshot before tick so the
                 # inspector / viewer see live UE state without an RPC.
-                if STATE.client.step_mode.value == "live":
+                if STATE.client.step_mode.value == "freerun":
                     snap = STATE.client._latest_state_snapshot
                     if snap is not None:
                         try:

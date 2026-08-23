@@ -70,14 +70,14 @@ def test_reset_with_seed(pie_client):
 def test_set_mode_round_trip(pie_client):
     """Switch to puppet then back to direct (only valid if AMjManager.StepMode == Auto)."""
     try:
-        pie_client.runtime.set_mode(StepMode.PUPPET)
+        pie_client.runtime.set_mode(StepMode.STATEPUSHED)
     except Exception as exc:
         # Server may be locked; that's a documented failure mode, not a bug.
         if "mode_locked_by_server" in str(exc):
             pytest.skip("Server StepMode is locked, mode switch unavailable")
         raise
-    pie_client.runtime.set_mode(StepMode.DIRECT)
-    assert pie_client.step_mode == StepMode.DIRECT
+    pie_client.runtime.set_mode(StepMode.STEPPED)
+    assert pie_client.step_mode == StepMode.STEPPED
 
 
 # --- Puppet mode --------------------------------------------------------------
@@ -86,7 +86,7 @@ def test_set_mode_round_trip(pie_client):
 def test_puppet_step_round_trip(pie_client):
     """`step(n=1)` in puppet mode runs mj_step locally and pushes state to UE."""
     try:
-        pie_client.runtime.set_mode(StepMode.PUPPET)
+        pie_client.runtime.set_mode(StepMode.STATEPUSHED)
     except Exception as exc:
         if "mode_locked_by_server" in str(exc):
             pytest.skip("Server StepMode is locked; puppet promotion unavailable")
@@ -101,7 +101,7 @@ def test_puppet_step_round_trip(pie_client):
 def test_puppet_step_n_zero_just_pushes_state(pie_client):
     """`step(n=0)` skips local mj_step and just pushes whatever is in client.data."""
     try:
-        pie_client.runtime.set_mode(StepMode.PUPPET)
+        pie_client.runtime.set_mode(StepMode.STATEPUSHED)
     except Exception as exc:
         if "mode_locked_by_server" in str(exc):
             pytest.skip("Server StepMode is locked; puppet promotion unavailable")
@@ -126,7 +126,7 @@ def test_streaming_pub_emits_state(pie_client, zmq_mod, msgpack_mod):  # noqa: A
     anything (filter "") and assert at least one frame arrives within
     5 seconds.
     """
-    pie_client.runtime.set_mode(StepMode.LIVE)
+    pie_client.runtime.set_mode(StepMode.FREERUN)
 
     state_port = 5555
     state_endpoint = f"{HOST}:{state_port}"
@@ -159,18 +159,18 @@ def test_close_reverts_to_live(pie_client):
     has nothing to revert from.
     """
     c1 = URLabClient(
-        HOST, step_mode=StepMode.DIRECT, step_port=STEP_PORT, recv_timeout_ms=2000
+        HOST, step_mode=StepMode.STEPPED, step_port=STEP_PORT, recv_timeout_ms=2000
     )
     c1.connect()
-    assert c1.step_mode == StepMode.DIRECT
+    assert c1.step_mode == StepMode.STEPPED
     c1.close()
 
     c2 = URLabClient(
-        HOST, step_mode=StepMode.AUTO, step_port=STEP_PORT, recv_timeout_ms=2000
+        HOST, step_mode="auto", step_port=STEP_PORT, recv_timeout_ms=2000
     )
     try:
         c2.connect()
-        current = c2.runtime.set_mode(StepMode.LIVE)
-        assert current == StepMode.LIVE
+        current = c2.runtime.set_mode(StepMode.FREERUN)
+        assert current == StepMode.FREERUN
     finally:
         c2.close()

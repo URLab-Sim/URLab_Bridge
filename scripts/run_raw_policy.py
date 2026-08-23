@@ -62,8 +62,8 @@ def main() -> int:
     parser.add_argument("--address", default="tcp://localhost")
     parser.add_argument("--step-port", type=int, default=5559)
     parser.add_argument("--state-port", type=int, default=5555)
-    parser.add_argument("--step-mode", default="direct",
-                        choices=["direct", "live"])
+    parser.add_argument("--step-mode", default="stepped",
+                        choices=["stepped", "freerun"])
     parser.add_argument("--transport", default="zmq", choices=["zmq", "shm"])
     parser.add_argument("--shm-dir", default=None,
                         help="explicit SHM session dir (default: pulled "

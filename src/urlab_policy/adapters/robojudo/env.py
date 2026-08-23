@@ -35,7 +35,7 @@ import numpy as np
 import zmq
 
 from urlab_client import URLabArticulation, URLabClient
-from urlab_client.enums import ObservationLevel, SpaceMode, StepMode, coerce, wire
+from urlab_client.enums import ObservationLevel, SpaceMode, coerce, wire
 
 from ..._state_stream import (
     StateStream,
@@ -531,12 +531,12 @@ if HAS_ROBOJUDO:
         state_port: int = 5555
 
         # Step semantics. The mode is the whole point of this port:
-        #  - "direct": synchronous; bridge sends ctrl + n_substeps, UE
+        #  - "stepped": synchronous; bridge sends ctrl + n_substeps, UE
         #    advances exactly that many physics steps and returns.
-        #  - "live": UE runs physics autonomously; bridge sends ctrl
+        #  - "freerun": UE runs physics autonomously; bridge sends ctrl
         #    per RPC and reads the latest snapshot.
-        #  - "puppet": bridge owns the integrator -- not yet supported.
-        step_mode: str = "direct"
+        #  - "statepushed": bridge owns the integrator -- not yet supported.
+        step_mode: str = "stepped"
 
         sim_dt: float = 0.002
         sim_decimation: int = 10

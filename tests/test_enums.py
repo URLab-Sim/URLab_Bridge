@@ -24,7 +24,6 @@ from urlab_client.enums import (
     ActuatorType,
     CameraMode,
     CameraTiming,
-    ControlMode,
     ControllerKind,
     ObservationLevel,
     SpaceMode,
@@ -35,15 +34,25 @@ from urlab_client.enums import (
 
 
 def test_step_mode_values():
-    assert StepMode.LIVE.value == "live"
-    assert StepMode.DIRECT.value == "direct"
-    assert StepMode.PUPPET.value == "puppet"
-    assert StepMode.AUTO.value == "auto"
+    assert StepMode.FREERUN.value == "freerun"
+    assert StepMode.STEPPED.value == "stepped"
+    assert StepMode.STATEPUSHED.value == "statepushed"
+    # The set of wire values is exactly the three step modes.
+    assert {m.value for m in StepMode} == {"freerun", "stepped", "statepushed"}
 
 
-def test_control_mode_values():
-    assert ControlMode.UE_CONTROLLER.value == "ue_controller"
-    assert ControlMode.RAW.value == "raw"
+def test_step_mode_has_no_auto_member():
+    """``auto`` is a client-side policy string, not an enum member/wire value."""
+    assert not hasattr(StepMode, "AUTO")
+    assert "auto" not in {m.value for m in StepMode}
+
+
+def test_control_mode_and_control_source_are_removed():
+    """ControlMode/ControlSource were deleted from the enums module."""
+    import urlab_client.enums as enums_mod
+
+    assert not hasattr(enums_mod, "ControlMode")
+    assert not hasattr(enums_mod, "ControlSource")
 
 
 def test_actuator_type_values_match_plan():
@@ -73,21 +82,26 @@ def test_controller_kind_has_pd_and_passthrough():
 
 def test_enum_is_str_mixin_serialises_to_wire_string():
     """The `str` mixin means enums JSON-serialise as their wire string."""
-    encoded = json.dumps({"mode": StepMode.PUPPET})
-    assert encoded == '{"mode": "puppet"}'
+    encoded = json.dumps({"mode": StepMode.STATEPUSHED})
+    assert encoded == '{"mode": "statepushed"}'
 
 
 def test_coerce_string_to_enum():
-    assert coerce(StepMode, "direct") is StepMode.DIRECT
-    assert coerce(ControlMode, "raw") is ControlMode.RAW
+    assert coerce(StepMode, "stepped") is StepMode.STEPPED
 
 
 def test_coerce_enum_passthrough():
-    assert coerce(StepMode, StepMode.DIRECT) is StepMode.DIRECT
+    assert coerce(StepMode, StepMode.STEPPED) is StepMode.STEPPED
 
 
 def test_coerce_with_default():
-    assert coerce(StepMode, None, default=StepMode.AUTO) is StepMode.AUTO
+    assert coerce(StepMode, None, default=StepMode.FREERUN) is StepMode.FREERUN
+
+
+def test_coerce_auto_is_not_a_wire_value():
+    """``auto`` is a client policy, not a StepMode; coercing it must raise."""
+    with pytest.raises(ValueError):
+        coerce(StepMode, "auto")
 
 
 def test_coerce_unknown_string_raises_and_warns(caplog):
@@ -97,8 +111,8 @@ def test_coerce_unknown_string_raises_and_warns(caplog):
 
 
 def test_wire_passthrough_and_enum():
-    assert wire(StepMode.PUPPET) == "puppet"
-    assert wire("puppet") == "puppet"
+    assert wire(StepMode.STATEPUSHED) == "statepushed"
+    assert wire("statepushed") == "statepushed"
 
 
 def test_round_trip_enum_to_wire_to_enum():

@@ -46,13 +46,13 @@ def _wtw_launcher(entry: dict, step_mode_str: str, art_prefix: Optional[str]) ->
     if client is None:
         raise RuntimeError("not connected")
 
-    # WTW is a stepped policy; force direct mode if the user picked something else.
-    if step_mode_str != "direct" or client.step_mode.value != "direct":
+    # WTW is a stepped policy; force stepped mode if the user picked something else.
+    if step_mode_str != "stepped" or client.step_mode.value != "stepped":
         try:
-            client.runtime.set_mode("direct")
-            log("WTW: switched step mode to direct")
+            client.runtime.set_mode("stepped")
+            log("WTW: switched step mode to stepped")
         except Exception as exc:
-            raise RuntimeError(f"failed to switch to direct mode: {exc}")
+            raise RuntimeError(f"failed to switch to stepped mode: {exc}")
 
     if art_prefix is None or art_prefix not in client.articulations:
         arts = list(client.articulations)

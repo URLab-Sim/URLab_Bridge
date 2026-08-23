@@ -22,11 +22,11 @@ RoboJuDo missing, mjlab missing) silently drop their entries.
 Each entry defines the import path, DOF requirement, and description.
 
 Optional fields:
-    "required_step_mode": one of "live" / "direct" / "puppet" / "auto"
+    "required_step_mode": one of "freerun" / "stepped" / "statepushed"
         (or a tuple of those if either-works) for policies that require
         a specific URLab step mode. The launcher rejects mismatched
         modes with a clear error. Existing pre-step-server policies are
-        live-streaming (twist over PUB/SUB); they don't need the field.
+        freerun-streaming (twist over PUB/SUB); they don't need the field.
 """
 
 from __future__ import annotations

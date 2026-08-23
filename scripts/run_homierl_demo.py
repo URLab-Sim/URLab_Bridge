@@ -116,7 +116,7 @@ def main() -> int:
     logger.info("connecting to URLab at %s (transport=%s)", args.address, args.transport)
     client = URLabClient(
         args.address,
-        step_mode="direct",
+        step_mode="stepped",
         step_port=args.step_port,
         state_port=args.state_port,
         transport=args.transport,

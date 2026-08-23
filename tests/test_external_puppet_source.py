@@ -33,21 +33,21 @@ def test_attach_puppet_simulation_keeps_external_objects_by_identity(mujoco_mod)
     assert client.model is model
     assert client.data is data
     assert client.local_model is False
-    assert client.step_mode is StepMode.PUPPET
+    assert client.step_mode is StepMode.STATEPUSHED
 
 
-@pytest.mark.parametrize("step_mode", ["direct", "live"])
+@pytest.mark.parametrize("step_mode", ["stepped", "freerun"])
 def test_attach_puppet_simulation_rejects_non_puppet_mode(mujoco_mod, step_mode):
     model, data = _simulation(mujoco_mod)
     client = URLabClient(step_mode=step_mode)
 
-    with pytest.raises(ValueError, match="puppet"):
+    with pytest.raises(ValueError, match="statepushed"):
         client.attach_puppet_simulation(model, data)
 
 
 def test_attach_puppet_simulation_rejects_connected_client(mujoco_mod):
     model, data = _simulation(mujoco_mod)
-    client = URLabClient(step_mode="puppet")
+    client = URLabClient(step_mode="statepushed")
     client.session_id = "connected"
 
     with pytest.raises(RuntimeError, match="before connect"):
@@ -58,7 +58,7 @@ def test_attach_puppet_simulation_rejects_data_from_another_model(mujoco_mod):
     model, _ = _simulation(mujoco_mod)
     other_model, other_data = _simulation(mujoco_mod)
     assert other_model is not model
-    client = URLabClient(step_mode="puppet")
+    client = URLabClient(step_mode="statepushed")
 
     with pytest.raises(ValueError, match="same model"):
         client.attach_puppet_simulation(model, other_data)
@@ -78,7 +78,7 @@ def test_external_puppet_step_zero_pushes_without_advancing(
     mock_step_server.replies.extend([handshake, wr.step_ok()])
     client = URLabClient(
         "tcp://127.0.0.1",
-        step_mode="puppet",
+        step_mode="statepushed",
         step_port=mock_step_server.port,
         recv_timeout_ms=2000,
         auto_promote_step_mode=False,
@@ -93,7 +93,7 @@ def test_external_puppet_step_zero_pushes_without_advancing(
         client.close()
 
     request = mock_step_server.received[1]
-    assert request["mode"] == "puppet"
+    assert request["mode"] == "statepushed"
     assert request["n_steps"] == 0
     assert request["qpos"][0] == pytest.approx(0.125)
     assert request["qvel"][0] == pytest.approx(0.5)

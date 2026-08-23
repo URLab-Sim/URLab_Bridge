@@ -447,7 +447,7 @@ def spawn_grid_ok(*, count: int = 0,
             **extra}
 
 
-def set_mode_ok(*, previous_mode: str = "live",
+def set_mode_ok(*, previous_mode: str = "freerun",
                 current_mode: str,
                 **extra: Any) -> Dict[str, Any]:
     return {"op": "set_mode_ok", "previous_mode": previous_mode,

@@ -28,7 +28,7 @@ from urlab_client.enums import ControllerKind
 
 @pytest.fixture
 def client(base_handshake):
-    c = URLabClient(step_mode="direct")
+    c = URLabClient(step_mode="stepped")
     c._apply_handshake(base_handshake)
     return c
 

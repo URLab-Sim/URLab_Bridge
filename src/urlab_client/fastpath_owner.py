@@ -663,17 +663,6 @@ class FastPathOwner:
             poses["cxpos"], poses["cxquat"], usercam, model=model, data=data,
         )
 
-    def publish_geoms(self, frame: int, xpos, xquat, cxpos=None, cxquat=None) -> None:
-        """Publish one per-geom transform frame on the ``render`` topic.
-
-        xpos is a flat length-3*ngeom sequence, xquat length-4*ngeom (wxyz).
-        cxpos/cxquat, when given, are the per-camera world transforms (3*ncam and
-        4*ncam wxyz) so streamed cameras track moving bodies.
-        """
-        self._send_transforms(
-            {"f": int(frame), "xpos": list(xpos), "xquat": list(xquat)}, cxpos, cxquat
-        )
-
     # -- optional gRPC face ------------------------------------------------- #
     def start_grpc_server(self, port: int = 50051, bind: str = "0.0.0.0") -> str:
         """Serve this owner over gRPC too (mirrors subscribe + perturb over gRPC,

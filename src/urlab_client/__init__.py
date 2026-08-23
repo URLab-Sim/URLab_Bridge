@@ -47,7 +47,7 @@ Errors:
 
 Enums:
 
-    StepMode, ControlMode, ActuatorType, ControllerKind, CameraMode,
+    StepMode, ActuatorType, ControllerKind, CameraMode,
     CameraTiming, ObservationLevel, SpaceMode
 
 Typed result objects:
@@ -89,8 +89,6 @@ from .enums import (
     ActuatorType,
     CameraMode,
     CameraTiming,
-    ControlMode,
-    ControlSource,
     ControllerKind,
     LightKind,
     ObservationLevel,
@@ -191,8 +189,6 @@ __all__ = [
     "ActuatorType",
     "CameraMode",
     "CameraTiming",
-    "ControlMode",
-    "ControlSource",
     "ControllerKind",
     "LightKind",
     "ObservationLevel",

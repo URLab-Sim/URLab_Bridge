@@ -162,8 +162,8 @@ def _live_session():
             )
         time.sleep(0.5)
         client.connect()
-        if client.step_mode != StepMode.DIRECT:
-            client.runtime.set_mode(StepMode.DIRECT)
+        if client.step_mode != StepMode.STEPPED:
+            client.runtime.set_mode(StepMode.STEPPED)
         yield state
     finally:
         try:
@@ -207,8 +207,8 @@ def _ensure_pie_for_pie_client(client) -> None:
             )
         time.sleep(0.5)
         client.connect()
-    if client.step_mode != StepMode.DIRECT:
-        client.runtime.set_mode(StepMode.DIRECT)
+    if client.step_mode != StepMode.STEPPED:
+        client.runtime.set_mode(StepMode.STEPPED)
 
 
 @pytest.fixture

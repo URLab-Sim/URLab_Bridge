@@ -145,7 +145,19 @@ class URLabClient:
         puppet_drift_check: str = "warn",
     ):
         self.address = address
-        self.step_mode: StepMode = coerce(StepMode, step_mode, default=StepMode.AUTO)
+        # "auto" is a client-side policy (leave the server in its default mode,
+        # allow a later attach_puppet_simulation / set_mode to promote), NOT a
+        # wire value -- so it is not a StepMode member. Anything else must name
+        # one of the three wire modes.
+        if isinstance(step_mode, StepMode):
+            self._auto_step_mode = False
+            self.step_mode: StepMode = step_mode
+        elif str(step_mode).lower() == "auto":
+            self._auto_step_mode = True
+            self.step_mode = StepMode.FREERUN
+        else:
+            self._auto_step_mode = False
+            self.step_mode = coerce(StepMode, step_mode)
         self.step_port = step_port
         self.state_port = state_port
         self.mujoco_version_check = mujoco_version_check
@@ -356,9 +368,9 @@ class URLabClient:
             raise RuntimeError(
                 "attach_puppet_simulation must be called before connect"
             )
-        if self.step_mode not in (StepMode.AUTO, StepMode.PUPPET):
+        if not (self._auto_step_mode or self.step_mode == StepMode.STATEPUSHED):
             raise ValueError(
-                "external simulation attachment requires puppet or auto mode"
+                "external simulation attachment requires statepushed or auto mode"
             )
         if not isinstance(model, mujoco.MjModel):
             raise TypeError("model must be a mujoco.MjModel")
@@ -370,7 +382,8 @@ class URLabClient:
         self.model = model
         self.data = data
         self.local_model = False
-        self.step_mode = StepMode.PUPPET
+        self._auto_step_mode = False
+        self.step_mode = StepMode.STATEPUSHED
 
     # -- transport --------------------------------------------------------
 
@@ -492,9 +505,9 @@ class URLabClient:
         raises.
 
         After the handshake, if the user constructed the client with an
-        explicit `step_mode` (`direct` or `puppet`), tell the server to
+        explicit `step_mode` (`stepped` or `statepushed`), tell the server to
         switch into that mode. The UE step server defaults to
-        `live` and rejects `step` requests until a `set_mode`
+        `freerun` and rejects `step` requests until a `set_mode`
         promotes it.
         """
         obs_str = wire(coerce(ObservationLevel, observations))
@@ -575,7 +588,7 @@ class URLabClient:
 
         if (
             self._auto_promote_step_mode
-            and self.step_mode in (StepMode.DIRECT, StepMode.PUPPET)
+            and self.step_mode in (StepMode.STEPPED, StepMode.STATEPUSHED)
         ):
             try:
                 self.runtime.set_mode(self.step_mode)
@@ -1039,7 +1052,7 @@ class URLabClient:
             if slack > 0:
                 time.sleep(slack)
 
-        if self.step_mode == StepMode.PUPPET:
+        if self.step_mode == StepMode.STATEPUSHED:
             reply = self._step_puppet(
                 n_steps, observations=obs_str, include_cameras=inline_cameras
             )
@@ -1273,7 +1286,7 @@ class URLabClient:
         # was "sync". In puppet mode the server pauses those publishers, so
         # "sync" is in practice the only policy that yields a frame here.
         request: Dict[str, Any] = {
-            "mode": wire(StepMode.PUPPET),
+            "mode": wire(StepMode.STATEPUSHED),
             "n_steps": int(n_steps),
             "observations": observations,
             "time": float(self.data.time),
@@ -1768,7 +1781,7 @@ class URLabClient:
         xml: "Union[str, bytes, os.PathLike]",
         assets: Optional[Mapping[str, bytes]] = None,
         *,
-        step_mode: str = "direct",
+        step_mode: str = "stepped",
         chunk_bytes: int = 4 * 1024 * 1024,
         asset_root: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1794,7 +1807,7 @@ class URLabClient:
             resolved against ``asset_root`` (or the XML directory + meshdir /
             texturedir).
         step_mode:
-            Advisory step mode recorded in the manifest (``"direct"`` default).
+            Advisory step mode recorded in the manifest (``"stepped"`` default).
         chunk_bytes:
             Max bytes per ``upload_model_chunk`` (default 4 MiB). Small blobs
             are sent as a single chunk.
@@ -2054,8 +2067,8 @@ class URLabClient:
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("URLabClient.close: release_lease failed: %s", exc)
             self.lease_id = None
-        # Revert URLab to live before tearing the transport down. If
-        # the client used auto-promote to enter direct/puppet, the server
+        # Revert URLab to freerun before tearing the transport down. If
+        # the client used auto-promote to enter stepped/statepushed, the server
         # stays in that mode forever once we disconnect (publishers stay
         # paused, editor users see the sim "stuck"). Best-effort -- swallow
         # any error so close() never raises during teardown. Symmetric with
@@ -2065,10 +2078,10 @@ class URLabClient:
             self._auto_promote_step_mode
             and self.session_id is not None
             and self.manager_present
-            and self.step_mode in (StepMode.DIRECT, StepMode.PUPPET)
+            and self.step_mode in (StepMode.STEPPED, StepMode.STATEPUSHED)
         ):
             try:
-                self.runtime.set_mode(StepMode.LIVE)
+                self.runtime.set_mode(StepMode.FREERUN)
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug(
                     "URLabClient.close: revert to live failed: %s", exc
@@ -2128,7 +2141,7 @@ class URLabClient:
         # mode, client.data is already authoritative (it drove the step);
         # UE's reply just echoes what we pushed.
         if (
-            self.step_mode != StepMode.PUPPET
+            self.step_mode != StepMode.STATEPUSHED
             and self.model is not None
             and self.data is not None
         ):

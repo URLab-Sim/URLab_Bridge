@@ -39,7 +39,7 @@ def test_concurrent_absorb_does_not_crash_or_corrupt(base_handshake):
     pytest.importorskip("mujoco")
     from urlab_client import URLabClient
 
-    client = URLabClient(step_mode="direct")
+    client = URLabClient(step_mode="stepped")
     client._apply_handshake(base_handshake)
 
     if client.model is None or client.data is None:

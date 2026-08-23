@@ -46,9 +46,9 @@ def _mjlab_launcher(entry: dict, step_mode_str: str, art_prefix: Optional[str]) 
     if client is None:
         raise RuntimeError("not connected")
 
-    if step_mode_str != "direct" or client.step_mode.value != "direct":
-        client.runtime.set_mode("direct")
-        log("mjlab: switched step mode to direct")
+    if step_mode_str != "stepped" or client.step_mode.value != "stepped":
+        client.runtime.set_mode("stepped")
+        log("mjlab: switched step mode to stepped")
 
     if not art_prefix:
         arts = list(client.articulations)

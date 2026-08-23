@@ -32,7 +32,7 @@ from . import wire_replies as wr
 def _make_client(port: int) -> URLabClient:
     return URLabClient(
         "tcp://127.0.0.1",
-        step_mode="direct",
+        step_mode="stepped",
         step_port=port,
         recv_timeout_ms=2000,
         auto_promote_step_mode=False,
@@ -49,11 +49,11 @@ def test_editor_time_hello_succeeds_with_no_manager(mock_step_server, mujoco_mod
     """Editor-time / pre-PIE handshake: server returns ``manager_present=false``
     with no mjb / no articulations. ``discover()`` must succeed and skip
     every PIE-only follow-up (auto-promote, streaming SUB startup)."""
-    # Use step_mode='direct' to make sure we'd normally try to auto-promote.
+    # Use step_mode='stepped' to make sure we'd normally try to auto-promote.
     # The bridge must NOT enqueue a set_mode RPC when manager_present=false.
     client = URLabClient(
         "tcp://127.0.0.1",
-        step_mode="direct",
+        step_mode="stepped",
         step_port=mock_step_server.port,
         recv_timeout_ms=2000,
         auto_promote_step_mode=True,
@@ -642,7 +642,7 @@ def test_set_qpos_mirrors_into_client_data_for_puppet_mode(
     the next puppet step preserves it."""
     client = URLabClient(
         "tcp://127.0.0.1",
-        step_mode="puppet",
+        step_mode="statepushed",
         step_port=mock_step_server.port,
         recv_timeout_ms=2000,
         auto_promote_step_mode=False,
@@ -878,7 +878,7 @@ def test_editor_runtime_lookup(base_handshake):
         if art["prefix"] == "vx300s":
             art["actor_id"] = "robot_a"
 
-    client = URLabClient(step_mode="direct")
+    client = URLabClient(step_mode="stepped")
     client._apply_handshake(h)
 
     ed = URLabSpawnHandle(

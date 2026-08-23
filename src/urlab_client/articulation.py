@@ -26,7 +26,6 @@ import numpy as np
 from .enums import (
     ActuatorType,
     CameraMode,
-    ControlMode,
     ControllerKind,
     StepMode,
     coerce,
@@ -571,9 +570,9 @@ class URLabEntity:
         each step."""
         if self._client is None:
             raise RuntimeError(f"Entity {self.name!r} not bound to a client")
-        if self._client.step_mode == StepMode.PUPPET:
+        if self._client.step_mode == StepMode.STATEPUSHED:
             warnings.warn(
-                f"apply_xfrc on entity {self.name!r} is inert in puppet mode "
+                f"apply_xfrc on entity {self.name!r} is inert in statepushed mode "
                 "(client's mj_step is authoritative).",
                 stacklevel=2,
             )
@@ -664,9 +663,9 @@ class URLabArticulation(URLabEntity):
 
         # Default control mode defaults to "ue_controller" iff a controller
         # block is shipped. Callers can flip to "raw" before step().
-        default_mode_str = handshake.get("default_control_mode", "raw")
-        self.control_mode: ControlMode = coerce(
-            ControlMode, default_mode_str, default=ControlMode.RAW
+        default_mode_str = str(handshake.get("default_control_mode", "raw") or "raw")
+        self.control_mode: str = (
+            default_mode_str if default_mode_str in ("ue_controller", "raw") else "raw"
         )
 
         # Controller (may be None in "raw" articulations)
@@ -769,8 +768,8 @@ class URLabArticulation(URLabEntity):
         self.ctrl_array: np.ndarray = np.zeros(n_act, dtype=np.float64)
         # Last ctrl actually applied on UE side, echoed back in step replies.
         # Distinct from ctrl_array (the user's outgoing setpoint buffer).
-        # In live this is UE's PD-controller torque output; in
-        # direct/puppet it equals what the bridge sent. Read-only mirror.
+        # In freerun this is UE's PD-controller torque output; in
+        # stepped/statepushed it equals what the bridge sent. Read-only mirror.
         self.last_applied_ctrl: np.ndarray = np.zeros(n_act, dtype=np.float64)
         # Activation state for stateful actuators (cylinder, integrated
         # velocity, etc). Populated from `act` in step replies at
@@ -1378,7 +1377,7 @@ class URLabArticulation(URLabEntity):
         if actions_raw is not None:
             self.actions = int(actions_raw)
 
-    def _build_step_request(self, *, control_mode: Optional[ControlMode]) -> Dict[str, Any]:
+    def _build_step_request(self, *, control_mode: Optional[str]) -> Dict[str, Any]:
         """Serialize the articulation's outgoing step payload."""
         from .enums import wire as _wire
         out: Dict[str, Any] = {

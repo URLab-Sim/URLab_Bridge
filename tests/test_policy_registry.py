@@ -32,35 +32,35 @@ def test_no_requirement_returns_none():
 
 def test_single_mode_normalises_to_tuple():
     assert get_required_step_mode(
-        {"required_step_mode": "direct"}
-    ) == (StepMode.DIRECT,)
+        {"required_step_mode": "stepped"}
+    ) == (StepMode.STEPPED,)
     assert get_required_step_mode(
-        {"required_step_mode": StepMode.PUPPET}
-    ) == (StepMode.PUPPET,)
+        {"required_step_mode": StepMode.STATEPUSHED}
+    ) == (StepMode.STATEPUSHED,)
 
 
 def test_tuple_of_modes_preserves_each():
     result = get_required_step_mode(
-        {"required_step_mode": ("direct", StepMode.PUPPET)}
+        {"required_step_mode": ("stepped", StepMode.STATEPUSHED)}
     )
-    assert result == (StepMode.DIRECT, StepMode.PUPPET)
+    assert result == (StepMode.STEPPED, StepMode.STATEPUSHED)
 
 
 def test_check_step_mode_compatible_passes():
-    entry = {"required_step_mode": "direct"}
-    check_step_mode_compatible(entry, "direct")
-    check_step_mode_compatible(entry, StepMode.DIRECT)
+    entry = {"required_step_mode": "stepped"}
+    check_step_mode_compatible(entry, "stepped")
+    check_step_mode_compatible(entry, StepMode.STEPPED)
 
 
 def test_check_step_mode_compatible_rejects():
-    entry = {"required_step_mode": ("direct", "puppet")}
+    entry = {"required_step_mode": ("stepped", "statepushed")}
     with pytest.raises(ValueError, match="step_mode"):
-        check_step_mode_compatible(entry, "live")
+        check_step_mode_compatible(entry, "freerun")
 
 
 def test_check_skips_when_no_requirement():
-    check_step_mode_compatible({}, "live")
-    check_step_mode_compatible({}, StepMode.PUPPET)
+    check_step_mode_compatible({}, "freerun")
+    check_step_mode_compatible({}, StepMode.STATEPUSHED)
 
 
 def test_robot_spec_resolves_from_registry_entry():

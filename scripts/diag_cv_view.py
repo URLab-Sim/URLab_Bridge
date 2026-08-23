@@ -28,10 +28,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="tcp://127.0.0.1")
     ap.add_argument("--step-port", type=int, default=5559)
-    ap.add_argument("--mode", default="live", choices=("live", "direct", "keep"),
-                    help="step mode to put the server in first (default live). "
-                         "A camera captures on state change, so in direct mode "
-                         "nothing publishes unless something is stepping; live "
+    ap.add_argument("--mode", default="freerun", choices=("freerun", "stepped", "keep"),
+                    help="step mode to put the server in first (default freerun). "
+                         "A camera captures on state change, so in stepped mode "
+                         "nothing publishes unless something is stepping; freerun "
                          "lets UE advance itself, which is what a latency read "
                          "wants. 'keep' leaves the server where it is.")
     args = ap.parse_args()

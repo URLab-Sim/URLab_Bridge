@@ -35,7 +35,7 @@ def main() -> None:
     )
     add_common_args(parser)
     parser.add_argument(
-        "--step-mode", choices=("auto", "direct", "puppet", "live"), default="auto",
+        "--step-mode", choices=("auto", "freerun", "stepped", "statepushed"), default="auto",
         help="Step mode to negotiate with the server. Default: auto.",
     )
     args = parser.parse_args()

@@ -60,7 +60,7 @@ def run_transport(transport: str, cam: str, iters: int, warmup: int) -> List[dic
     c.connect()
     names = c.camera_names()
     cam = cam if cam in names else (names[0] if names else "")
-    c.runtime.set_mode("puppet")
+    c.runtime.set_mode("statepushed")
 
     m = mujoco.MjModel.from_xml_path(GOLDEN)
     d = mujoco.MjData(m)
