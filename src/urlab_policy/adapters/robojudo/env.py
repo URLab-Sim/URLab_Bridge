@@ -25,12 +25,12 @@ from __future__ import annotations
 
 import json
 import logging
-import struct
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
+import msgpack
 import numpy as np
 import zmq
 
@@ -119,25 +119,21 @@ class ZmqLink:
 
     def send_control(self, prefix: str, targets: np.ndarray,
                      actuator_ids: list[int] | None = None):
-        n = len(targets)
-        data = struct.pack("<i", n)
-        for i, val in enumerate(targets):
-            aid = actuator_ids[i] if actuator_ids else i
-            data += struct.pack("<if", aid, float(val))
+        # Control-in is a msgpack `{ids:[...], vals:[...]}` payload
+        # (source-of-truth §9.3), parsed UE-side by FURLabMsgpackUtil. The
+        # legacy little-endian `[i32 n][i32 id, f32 val]*` binary format is
+        # retired (unsafe-cast parser removed, H9).
+        ids = [int(actuator_ids[i]) if actuator_ids else i
+               for i in range(len(targets))]
+        vals = [float(v) for v in targets]
+        payload = msgpack.packb({"ids": ids, "vals": vals}, use_bin_type=True)
         self.ctrl_pub.send_string(f"{prefix}/control ", zmq.SNDMORE)
-        self.ctrl_pub.send(data)
+        self.ctrl_pub.send(payload)
 
-    def send_gains(self, prefix: str, joint_names: list[str],
-                   kp: np.ndarray, kv: np.ndarray, torque_limits: np.ndarray):
-        gains = {}
-        for i, name in enumerate(joint_names):
-            gains[name] = {
-                "kp": float(kp[i]) if i < len(kp) else 100.0,
-                "kv": float(kv[i]) if i < len(kv) else 5.0,
-                "torque_limit": float(torque_limits[i]) if i < len(torque_limits) else 200.0,
-            }
-        self.ctrl_pub.send_string(f"{prefix}/set_gains ", zmq.SNDMORE)
-        self.ctrl_pub.send_string(json.dumps(gains))
+    # NOTE: The `{prefix}/set_gains` PUB topic has been retired (H4): UE never
+    # had a handler for it, so it was a silent no-op. PD gains are pushed via
+    # the `configure_controller` RPC instead -- see URLabPDController.set_gains /
+    # URLabArticulation.push_gains on the URLabClient path.
 
     def close(self):
         self.state.close()

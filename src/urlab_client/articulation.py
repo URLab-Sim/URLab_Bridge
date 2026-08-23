@@ -244,9 +244,9 @@ class URLabController:
     in turn calls `UMjArticulationController::ApplyConfig`.
 
     Setters are safe to call in any step mode and under any `control_mode`
-    (they route through the same UE path the `{prefix}/set_gains` PUB/SUB
-    topic uses). Under `"raw"` control the server still tracks params for
-    when the caller flips back to `"ue_controller"`.
+    (they route through the `configure_controller` RPC). Under `"raw"`
+    control the server still tracks params for when the caller flips back
+    to `"ue_controller"`.
     """
 
     def __init__(
@@ -329,8 +329,9 @@ class URLabPDController(URLabController):
     """PD-specific typed setters.
 
     `set_gains(kp={...}, kv={...}, torque_limit={...})` uses partial-patch
-    semantics: any joint not mentioned keeps its current value. This
-    matches the `{prefix}/set_gains` PUB/SUB contract.
+    semantics: any joint not mentioned keeps its current value. Applied via
+    the `configure_controller` RPC (the retired `{prefix}/set_gains` PUB
+    topic had no UE handler and was a silent no-op, H4).
 
     `set_defaults(kp=..., kv=..., torque_limit=...)` sets the `default_*`
     scalars which UE uses as fallbacks for unmentioned joints.
