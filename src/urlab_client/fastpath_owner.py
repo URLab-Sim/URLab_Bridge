@@ -325,7 +325,7 @@ class FastPathOwner:
             try:
                 if "refselpos" in req or "localpos" in req or "active" in req:
                     self.submit_perturb(
-                        int(req.get("select", req.get("body", -1))),
+                        int(req.get("select", -1)),
                         bool(req.get("active", True)),
                         req.get("localpos", (0, 0, 0)),
                         req.get("refselpos", (0, 0, 0)))

@@ -273,9 +273,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 def _join_vr(owner: OwnerInfo) -> int:
-    """Launch a UE viewer instance pointed at the owner's state bus. The drone
-    free-fly pawn / VR level (Phase 5) lands on the UE side; until then this boots
-    the existing ViewerSubscribeTransport viewer, which renders the owner's sim."""
+    """Launch a UE viewer instance pointed at the owner's transform stream. The
+    viewer boots as an ordinary transform-mirror renderer (Drive=stream, no engine,
+    no mj_forward) with the free-fly drone / VR pawn (-URLabCaps=vr)."""
     src = owner.bus or owner.control
     if not src:
         print("owner advertises no ZMQ viewer bus for a UE viewer; a UE-gRPC "
@@ -288,7 +288,7 @@ def _join_vr(owner: OwnerInfo) -> int:
         ue = ue or "<UnrealEditor>"
         proj = proj or "<project.uproject>"
     cmd = (f'{ue} {proj} /Game/FastPath/FastPathRender -game '
-           f'-URLabStateSource={src} -URLabVrViewer -windowed')
+           f'-URLabDrive=stream:{src} -URLabCaps=vr -windowed')
     print(cmd)
     return 0
 

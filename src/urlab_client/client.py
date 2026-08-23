@@ -226,9 +226,11 @@ class URLabClient:
         self.debug = _DebugNamespace(self)
         self.viewport = _ViewportNamespace(self)
 
-        # Entity-level xfrc buffer; cleared post-step. Per-articulation
-        # xfrc is tracked separately on each URLabArticulation.
-        self._pending_entity_xfrc: Dict[str, np.ndarray] = {}
+        # Root-body xfrc buffer for plain URLabEntity.apply_xfrc, keyed by
+        # entity/root-body name; cleared post-step. Folded into the step
+        # request's per-articulation `xfrc_applied` (the live path). Per-body
+        # articulation xfrc is tracked separately on each URLabArticulation.
+        self._pending_root_xfrc: Dict[str, np.ndarray] = {}
 
         # Observation level requested at connect(); re-sent on any internal
         # handshake refetch so a model-fallback round-trip does not silently
@@ -1211,16 +1213,14 @@ class URLabClient:
             "observations": observations,
             "per_articulation": per_art,
         }
-        # Entity-level external wrenches (URLabEntity.apply_xfrc) ride the step
-        # request keyed by body name. This is the wire half of the feature;
-        # the server must read `entity_xfrc` and stamp d->xfrc_applied for
-        # those bodies (plugin-side work). Until it does the forces have no
-        # effect, but they are no longer silently discarded on the client.
-        if self._pending_entity_xfrc:
-            request["entity_xfrc"] = {
-                name: vec.tolist()
-                for name, vec in self._pending_entity_xfrc.items()
-            }
+        # Root-body external wrenches (URLabEntity.apply_xfrc) route through the
+        # live per-articulation `xfrc_applied` step path -- the server resolves
+        # the body by name (raw or prefixed) and stamps d->xfrc_applied for the
+        # next mj_step. Each entity's root wrench becomes a single-body block
+        # keyed by the entity/root-body name.
+        for name, vec in self._pending_root_xfrc.items():
+            block = per_art.setdefault(name, {})
+            block.setdefault("xfrc_applied", {})[name] = vec.tolist()
         if include_cameras:
             request["include_cameras"] = include_cameras
         reply = self._rpc("step", request, expected_op="step_ok")
@@ -1228,7 +1228,7 @@ class URLabClient:
         # Clear xfrc post-step per MuJoCo semantics
         for art in self.articulations.values():
             art.clear_xfrc()
-        self._pending_entity_xfrc.clear()
+        self._pending_root_xfrc.clear()
         return reply
 
     def _step_puppet(
@@ -1253,14 +1253,14 @@ class URLabClient:
         # overwritten by the pushed state every step. Rather than let them sit
         # in the buffers and silently resurrect on a later mode switch, warn
         # once and clear them here.
-        if self._pending_entity_xfrc:
+        if self._pending_root_xfrc:
             warnings.warn(
                 "puppet step: dropping pending entity xfrc "
-                f"{sorted(self._pending_entity_xfrc)} (external wrenches are "
+                f"{sorted(self._pending_root_xfrc)} (external wrenches are "
                 "inert in puppet mode; the client's mj_step is authoritative).",
                 stacklevel=2,
             )
-            self._pending_entity_xfrc.clear()
+            self._pending_root_xfrc.clear()
         stale_art_xfrc = [
             art.prefix for art in self.articulations.values() if art._pending_xfrc
         ]

@@ -118,7 +118,7 @@ class _OwnerServicer:
             # Interactive drag intent -> mjv spring; else a raw wrench -> exact force.
             if "refselpos" in req or "localpos" in req or "active" in req:
                 self._owner.submit_perturb(
-                    req.get("select", req.get("body", -1)),
+                    req.get("select", -1),
                     req.get("active", True),
                     req.get("localpos", (0, 0, 0)),
                     req.get("refselpos", (0, 0, 0)))

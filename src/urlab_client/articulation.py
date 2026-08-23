@@ -582,7 +582,7 @@ class URLabEntity:
         if torque is not None:
             vec[3:] = np.asarray(torque, dtype=np.float64)
         self._pending_xfrc = vec
-        self._client._pending_entity_xfrc[self.name] = vec
+        self._client._pending_root_xfrc[self.name] = vec
 
     def clear_xfrc(self) -> None:
         self._pending_xfrc = None
