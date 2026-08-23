@@ -319,6 +319,54 @@ def test_resolve_endpoint_rewrites_bind_wildcard():
     assert resolve_endpoint("", "tcp://127.0.0.1") == ""
 
 
+def test_make_transport_uri_scheme_selects_backend():
+    """`make_transport` maps an endpoint URI's scheme onto a backend and folds
+    the authority/path onto address/step_port/shm_dir (source-of-truth 9.1):
+        tcp://h:p  -> ZmqTransport   (p = step/RPC port)
+        grpc://h:p -> GrpcTransport  (p = gRPC listen port)
+        shm://<d>  -> ShmTransport   (d = session dir)
+    An unknown scheme raises ValueError; bare backend names still work.
+
+    Construction is lazy in every backend (no socket/channel/mmap opened in
+    __init__), so this is hermetic -- no live network, no display.
+    """
+    from urlab_client.transports import make_transport
+
+    # tcp:// -> ZMQ; authority overrides `address`, port overrides `step_port`.
+    t = make_transport("tcp://1.2.3.4:5560", "tcp://ignored", step_port=1)
+    assert type(t).__name__ == "ZmqTransport"
+    assert t.address == "tcp://1.2.3.4"
+    assert t.step_port == 5560
+
+    # grpc:// -> gRPC; port is the gRPC listen port, not the ZMQ step port.
+    g = make_transport("grpc://myhost:5560", "tcp://ignored", step_port=1)
+    assert type(g).__name__ == "GrpcTransport"
+    assert g._target == "myhost:5560"  # host:port folded onto the gRPC target
+
+    # shm://<dir>: absolute path (shm:///abs) -> dir is the path.
+    s = make_transport("shm:///abs/session/dir", "tcp://127.0.0.1")
+    assert type(s).__name__ == "ShmTransport"
+    assert s.shm_dir == "/abs/session/dir"
+    # shm://<dir>: a relative dir rides the netloc.
+    s2 = make_transport("shm://reldir", "tcp://127.0.0.1")
+    assert type(s2).__name__ == "ShmTransport"
+    assert s2.shm_dir == "reldir"
+
+    # An unknown scheme is rejected.
+    with pytest.raises(ValueError):
+        make_transport("wss://x:9", "tcp://127.0.0.1")
+
+    # Bare backend names still route (the pre-URI grammar), unchanged.
+    assert type(make_transport("zmq", "tcp://127.0.0.1")).__name__ == "ZmqTransport"
+    assert type(make_transport("grpc", "tcp://127.0.0.1")).__name__ == "GrpcTransport"
+    assert type(
+        make_transport("shm", "tcp://127.0.0.1", shm_dir="/tmp/urlab_shm_x")
+    ).__name__ == "ShmTransport"
+    # Bare `shm` with no dir cannot construct.
+    with pytest.raises(ValueError):
+        make_transport("shm", "tcp://127.0.0.1")
+
+
 def test_recording_start_stop_save(mock_step_server, base_handshake):
     from pathlib import Path
 

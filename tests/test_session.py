@@ -74,6 +74,44 @@ def test_resolve_by_id_host_endpoint(tmp_path):
     assert _resolve("5.6.7.8:50051", owners).grpc == "5.6.7.8:50051"
 
 
+def test_ghost_pruning_local_only(tmp_path, monkeypatch):
+    """Only a LOCAL-host entry whose pid is dead is dropped on discover (and its
+    file opportunistically pruned). A remote dead entry is kept (its pid is
+    unknowable here), and ``include_dead=True`` keeps everything and prunes
+    nothing. Covers session.py's ``_is_local_host``-guarded prune path.
+
+    pid_alive is patched to a pure predicate so the test is deterministic and
+    doesn't depend on any real process id being (un)reachable."""
+    from urlab_client import session as sess
+
+    live_pid = 4242
+    dead_pid = 4343
+    monkeypatch.setattr(sess, "pid_alive", lambda pid: pid == live_pid)
+
+    def _owner(instance_id, host, pid):
+        return {
+            "instance_id": instance_id, "role": OWNER_ROLE, "host": host,
+            "grpc": f"{host}:50051", "transports": ["grpc"], "pid": pid,
+            "registry_written_at": 1700000000,
+        }
+
+    _write(tmp_path, "fastpath_live_local.json", _owner("live-local", "127.0.0.1", live_pid))
+    _write(tmp_path, "fastpath_dead_local.json", _owner("dead-local", "127.0.0.1", dead_pid))
+    _write(tmp_path, "fastpath_dead_remote.json", _owner("dead-remote", "10.99.99.99", dead_pid))
+
+    # include_dead: all three returned, nothing pruned.
+    all_owners = sess.discover_owners(registry_dir=str(tmp_path), include_dead=True)
+    assert {o.instance_id for o in all_owners} == {"live-local", "dead-local", "dead-remote"}
+    assert (tmp_path / "fastpath_dead_local.json").exists()
+
+    # default: dead-LOCAL dropped + its file unlinked; dead-REMOTE kept.
+    owners = sess.discover_owners(registry_dir=str(tmp_path))
+    assert {o.instance_id for o in owners} == {"live-local", "dead-remote"}
+    assert not (tmp_path / "fastpath_dead_local.json").exists()
+    assert (tmp_path / "fastpath_live_local.json").exists()
+    assert (tmp_path / "fastpath_dead_remote.json").exists()
+
+
 def test_format_table():
     assert "no owner" in format_table([])
     owners = discover_owners(endpoints=["9.9.9.9:50051"], registry_dir="/nonexistent")
