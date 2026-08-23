@@ -40,11 +40,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional, Sequence, Tuple
 
-from .pool import default_registry_dir, pid_alive
+from .pool import OWNER_ROLE, default_registry_dir, is_owner_entry, pid_alive
 
 __all__ = ["OwnerInfo", "discover_owners", "format_table", "OWNER_ROLE"]
 
-OWNER_ROLE = "fastpath_owner"
 DEFAULT_GRPC_PORT = 50051
 
 
@@ -99,10 +98,10 @@ def _host_of(endpoint: Optional[str]) -> str:
 
 
 def _owner_from_entry(data: dict) -> Optional[OwnerInfo]:
+    if not is_owner_entry(data):
+        return None
     role = str(data.get("role", ""))
     caps = tuple(str(c) for c in (data.get("capabilities") or []))
-    if role != OWNER_ROLE and OWNER_ROLE not in caps:
-        return None
     transports = data.get("transports")
     if not transports:
         transports = ["zmq"] + (["grpc"] if data.get("grpc") else [])

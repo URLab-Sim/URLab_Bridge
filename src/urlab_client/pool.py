@@ -56,6 +56,28 @@ DEFAULT_PORT_STRIDE = 10
 # on a server-tick heartbeat, so a live instance never looks this stale.
 DEFAULT_REGISTRY_TTL_S = 30.0
 
+# The registry role/capability string that marks an entry as a joinable fast-path
+# owner (a producer a viewer/renderer can join). Matches the UE writer
+# (InstanceRegistry.cpp) and the Python writer (fastpath_owner.py::_write_registry).
+OWNER_ROLE = "fastpath_owner"
+
+
+def is_owner_entry(data: Mapping[str, Any]) -> bool:
+    """The one shared role/capability match for the role-filtered registry readers.
+
+    An entry is an owner when its ``role`` is ``fastpath_owner`` *or* its
+    ``capabilities`` list contains ``fastpath_owner``. This is the single rule
+    used by every reader that filters by role (:func:`session.discover_owners`
+    and the UE ``DiscoverDrivers``) so they agree on what counts as an owner.
+
+    :func:`read_registry` stays role-agnostic (liveness/staleness only, the farm
+    read); if a caller ever wants to role-filter that list it uses this predicate
+    so the rule lives in one place.
+    """
+    role = str(data.get("role", ""))
+    caps = [str(c) for c in (data.get("capabilities") or [])]
+    return role == OWNER_ROLE or OWNER_ROLE in caps
+
 
 def default_registry_dir() -> str:
     """Return the registry directory: ``$URLAB_REGISTRY_DIR`` if set, else the
@@ -495,9 +517,11 @@ __all__ = [
     "DEFAULT_PORT_BASE",
     "DEFAULT_PORT_STRIDE",
     "DEFAULT_REGISTRY_TTL_S",
+    "OWNER_ROLE",
     "InstanceInfo",
     "URLabPool",
     "default_registry_dir",
+    "is_owner_entry",
     "pid_alive",
     "read_registry",
 ]
