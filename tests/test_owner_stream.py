@@ -1,10 +1,8 @@
 # Copyright (c) 2026 Jonathan Embley-Riches. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
-"""Owner stream + perturb wire tests: the surviving render tier (subscribe
-(format=render) transform round-trip over gRPC) and the owner's fastpath_perturb
-handling. The qpos render tier and the Python peek viewer were removed in Phase
-3.2/3.3, so those tests (viewer-frame decode, publish_state / start_viewer_stream
-round-trips, subscribe_viewer) are gone with them. No mujoco, no GUI."""
+"""Owner stream + perturb wire tests: the render tier (subscribe(format=render)
+transform round-trip over gRPC) and the owner's fastpath_perturb handling.
+No mujoco, no GUI."""
 from __future__ import annotations
 
 import socket
@@ -24,8 +22,7 @@ def _free_port() -> int:
 
 
 def perturb_request(body: int, force, torque) -> dict:
-    """The exact-wrench perturb request the owner accepts over the control channel
-    (formerly urlab_client.peek.perturb_request; inlined after peek's removal)."""
+    """The exact-wrench perturb request the owner accepts over the control channel."""
     return {
         "op": "fastpath_perturb", "body": int(body),
         "force": [float(x) for x in force], "torque": [float(x) for x in torque],

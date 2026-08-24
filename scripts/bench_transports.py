@@ -19,8 +19,8 @@
 """Benchmark ZMQ vs SHM transports across the three step modes.
 
 Connects to a running UnrealEditor / packaged build with both transports
-enabled (the default after plan §13 lands), runs N iterations of each
-(transport, mode) combination, and prints a comparison table.
+enabled (the default), runs N iterations of each (transport, mode)
+combination, and prints a comparison table.
 
 Run from the bridge repo root after starting URLab in the editor:
 
@@ -42,8 +42,8 @@ Metrics:
     state_hz     observed state-stream rate (live only)
 
 Notes:
-    - The SHM benchmark requires UE on the same host (single-host SHM, plan
-      §13.1). Cross-host runs use ZMQ.
+    - The SHM benchmark requires UE on the same host (single-host SHM).
+      Cross-host runs use ZMQ.
     - The bench script does not start UE -- launch the editor / packaged
       build yourself, then run this against it.
     - This is intentionally a lightweight smoke benchmark, not a rigorous

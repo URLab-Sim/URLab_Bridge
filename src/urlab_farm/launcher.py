@@ -24,7 +24,7 @@ per-instance project isolation.
 Project isolation (``--isolate-projects``, default OFF)
 -------------------------------------------------------
 Two editors can already share one project directory for pure rendering (no
-asset writes), so isolation is off by default and the first cut stays simple.
+asset writes), so isolation is off by default and stays simple.
 When enabled, this uses the LIGHTEST correct approach: a per-instance working
 directory holding a copy of the ``.uproject`` and ``Config/``, with ``Content/``
 and ``Plugins/`` linked back to the source project via an OS junction (Windows
@@ -35,7 +35,7 @@ Tradeoff: this isolates each instance's config, logs, DDC and intermediates, so
 DirectoryWatcher / AssetRegistry churn from one editor no longer perturbs the
 others. It does NOT yet isolate ``Content/`` writes: because ``Content/`` is
 junctioned back to the source, an asset-writing import would still land in the
-shared tree. That is acceptable for the render-only first cut, but a heavier
+shared tree. That is acceptable for the render-only path, but a heavier
 per-instance ``Content/`` copy (or the transient-runtime-import path) is
 REQUIRED before farm model-upload starts writing ``.uasset`` files. See
 ``docs/plan_render_farm.md`` section 3.5.

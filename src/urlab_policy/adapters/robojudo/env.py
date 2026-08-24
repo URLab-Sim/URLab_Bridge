@@ -120,9 +120,7 @@ class ZmqLink:
     def send_control(self, prefix: str, targets: np.ndarray,
                      actuator_ids: list[int] | None = None):
         # Control-in is a msgpack `{ids:[...], vals:[...]}` payload
-        # (source-of-truth §9.3), parsed UE-side by FURLabMsgpackUtil. The
-        # legacy little-endian `[i32 n][i32 id, f32 val]*` binary format is
-        # retired (unsafe-cast parser removed, H9).
+        # (source-of-truth §9.3), parsed UE-side by FURLabMsgpackUtil.
         ids = [int(actuator_ids[i]) if actuator_ids else i
                for i in range(len(targets))]
         vals = [float(v) for v in targets]
@@ -130,10 +128,10 @@ class ZmqLink:
         self.ctrl_pub.send_string(f"{prefix}/control ", zmq.SNDMORE)
         self.ctrl_pub.send(payload)
 
-    # NOTE: The `{prefix}/set_gains` PUB topic has been retired (H4): UE never
-    # had a handler for it, so it was a silent no-op. PD gains are pushed via
-    # the `configure_controller` RPC instead -- see URLabPDController.set_gains /
-    # URLabArticulation.push_gains on the URLabClient path.
+    # NOTE: There is no `{prefix}/set_gains` PUB topic; UE has no handler for
+    # one. PD gains are pushed via the `configure_controller` RPC instead --
+    # see URLabPDController.set_gains / URLabArticulation.push_gains on the
+    # URLabClient path.
 
     def close(self):
         self.state.close()
@@ -399,10 +397,9 @@ if HAS_ROBOJUDO:
                     self._connected = True
 
                 # Root/base state from the leading free joint. qpos/qvel are raw
-                # MuJoCo frame (the retired base_state binary carried the same
-                # slots), matching the state/full sensors, which are raw MuJoCo SI
-                # too; base state is still derived here from qpos/qvel rather than
-                # from framepos/framequat sensors.
+                # MuJoCo frame, matching the state/full sensors, which are raw
+                # MuJoCo SI too; base state is still derived here from qpos/qvel
+                # rather than from framepos/framequat sensors.
                 fb = free_base_state(qpos, qvel)
                 if fb is not None:
                     pos, quat_xyzw, lin_vel, ang_vel = fb

@@ -12,18 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Find and join live owner sessions -- the scriptable side of the peek.
+"""Find and join live owner sessions -- the scriptable side of joining as a viewer.
 
 An *owner* (a Python client or a UE instance) advertises itself in the shared
 registry (role ``fastpath_owner``) with the transports a viewer can reach it on
 (ZMQ bus/control and/or a gRPC endpoint), its scene, and capabilities. This
-module discovers those, and joins one as a viewer (a mujoco/pystudio peek) or VR.
+module discovers those and joins one as a VR mirror in UE.
 
 CLI (``python -m urlab_client.session``):
 
     session list [--endpoints h1:50051,h2:50051] [--registry DIR]
-    session join <target> --model scene.xml --mode viewer [--transport grpc|zmq]
-    session join <target> --model scene.xml --mode vr        # launches a UE viewer
+    session join <target> --model scene.xml [--transport grpc|zmq]  # launches a UE VR viewer
 
 ``target`` is an instance id, a host, or a ``host:port`` endpoint. The rich GUI
 server browser lives in the UE plugin (SMjServerBrowser); this is the headless
@@ -232,8 +231,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _common(pj)
     pj.add_argument("target", help="instance id / host / host:port")
     pj.add_argument("--model", required=True, help="scene xml/mjb the owner runs")
-    # The old Python "viewer" (peek) mode was removed in Phase 3.3; a desktop mirror
-    # is now an ordinary UE transform-mirror renderer. Only VR join remains.
+    # A desktop mirror is an ordinary UE transform-mirror renderer; "vr" is the
+    # only join mode.
     pj.add_argument("--mode", choices=["vr"], default="vr")
     pj.add_argument("--transport", choices=["zmq", "grpc"], default=None,
                     help="default: what the owner advertises")

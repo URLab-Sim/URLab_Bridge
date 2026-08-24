@@ -28,8 +28,8 @@ Ops served (mirror/VR are capability *consumers*, not modes):
 - ``subscribe`` (``format=render``) -- gated on the ``stream_cameras`` capability;
   a server-stream of the render tier (the true mirror -- per-body
   ``bxpos``/``bxquat`` + optional debug fields, consumer runs zero MuJoCo; op
-  ``view_frame``). The qpos render tier (``subscribe_viewer`` / ``format=qpos``)
-  was removed in Phase 3.2.
+  ``view_frame``). ``render`` is the only subscription format; there is no
+  ``subscribe_viewer`` / ``format=qpos`` tier.
 - ``fastpath_perturb`` -- gated on the ``accept_input`` capability; into the
   owner's perturb queue.
 
@@ -80,10 +80,10 @@ class _OwnerServicer:
                         {"ok": False, "error": "capability disabled: stream_cameras"},
                         use_bin_type=True))
                     return
-                # The one surviving tier is "render" (true mirror -- bxpos/bxquat +
-                # optional debug, viewer runs no MuJoCo). The qpos tier was removed
-                # in Phase 3.2. This stream is dedicated to the subscription; stream
-                # frames until the client goes away, then end (don't read further
+                # Only the "render" tier is served (true mirror -- bxpos/bxquat +
+                # optional debug, viewer runs no MuJoCo; there is no qpos tier).
+                # This stream is dedicated to the subscription; stream frames
+                # until the client goes away, then end (don't read further
                 # requests).
                 #
                 # Parse the debug-tier caps off the subscribe request (§8.2:

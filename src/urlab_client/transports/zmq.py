@@ -201,8 +201,8 @@ class ZmqTransport(Transport):
         backoff = _STREAM_RECONNECT_MIN_S
         # Outer loop rebuilds the SUB socket after a fatal recv error so a
         # transient publisher/context hiccup doesn't kill the stream for the
-        # rest of the session (the old code broke out silently). Every exit
-        # is logged so a dead stream is never invisible.
+        # rest of the session. Every exit is logged so a dead stream is never
+        # invisible.
         while not self._state_stop.is_set():
             sock = self._ctx.socket(zmq.SUB)
             sock.setsockopt(zmq.LINGER, 0)

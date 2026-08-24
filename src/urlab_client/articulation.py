@@ -329,8 +329,8 @@ class URLabPDController(URLabController):
 
     `set_gains(kp={...}, kv={...}, torque_limit={...})` uses partial-patch
     semantics: any joint not mentioned keeps its current value. Applied via
-    the `configure_controller` RPC (the retired `{prefix}/set_gains` PUB
-    topic had no UE handler and was a silent no-op, H4).
+    the `configure_controller` RPC; there is no `{prefix}/set_gains` PUB
+    topic, since UE has no handler for one.
 
     `set_defaults(kp=..., kv=..., torque_limit=...)` sets the `default_*`
     scalars which UE uses as fallbacks for unmentioned joints.

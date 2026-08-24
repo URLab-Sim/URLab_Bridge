@@ -14,9 +14,9 @@
 
 """``urlab-farm`` command-line entry point (``up`` / ``down`` / ``ps``).
 
-Runnable as ``python -m urlab_farm``. A ``[project.scripts]`` console entry
-(``urlab-farm = "urlab_farm.cli:main"``) should be added to ``pyproject.toml``
-in a later change so it installs as a ``urlab-farm`` executable.
+Runnable as ``python -m urlab_farm``, or as the ``urlab-farm`` executable
+installed via the ``[project.scripts]`` entry
+(``urlab-farm = "urlab_farm.cli:main"``) in ``pyproject.toml``.
 """
 
 from __future__ import annotations

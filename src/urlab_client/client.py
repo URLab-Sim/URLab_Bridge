@@ -501,8 +501,8 @@ class URLabClient:
         """Handshake: send `hello`, build the local model (MJB fast path,
         compiled-XML fallback when the server runs a different MuJoCo
         version), construct articulation wrappers. A version skew logs a
-        warning (silenced by `mujoco_version_check=False`); it no longer
-        raises.
+        warning (silenced by `mujoco_version_check=False`) rather than
+        raising.
 
         After the handshake, if the user constructed the client with an
         explicit `step_mode` (`stepped` or `statepushed`), tell the server to
@@ -604,10 +604,10 @@ class URLabClient:
                     raise
 
         # Spin up streaming SUBs in EVERY mode. Cameras are served from the
-        # async SHM/ZMQ streams in all step modes now (not bundled into the
-        # step reply), so puppet and direct need the SUBs running too. This is
-        # what decouples camera rate from step rate -- a puppet step at 30Hz
-        # no longer blocks on (or bloats its RPC reply with) a camera readback.
+        # async SHM/ZMQ streams in all step modes (never bundled into the step
+        # reply), so puppet and direct need the SUBs running too. This
+        # decouples camera rate from step rate -- a puppet step at 30Hz
+        # doesn't block on (or bloat its RPC reply with) a camera readback.
         # set_camera_streaming inside enables the per-camera broadcast.
         self._start_streaming_subs()
 
@@ -1669,9 +1669,9 @@ class URLabClient:
         This is the "fresh" guarantee: the monotonic frame_id is stamped when
         the stepped state is pushed to the render snapshot, so a streamed frame
         tagged >= it was rendered from a state at or after this step."""
-        # Normalise the selector the same way the gather path does; a list /
-        # tuple / set / str no longer silently degrades to "wait on every
-        # camera" (which made one dormant camera burn the full timeout).
+        # Normalise the selector the same way the gather path does, so a
+        # list / tuple / set / str selects only the requested cameras --
+        # a dormant camera outside the selection can't burn the full timeout.
         wanted = self._select_camera_names(include_cameras)
 
         def _all_fresh() -> bool:

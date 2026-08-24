@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Wire-level tests for the SHM state-stream transport (plan §13 Phase B).
+"""Wire-level tests for the SHM state-stream transport.
 
 Spins up a Python producer that writes the same FMjShmHeader layout the UE
 publisher does, then verifies a ShmTransport consumer picks the snapshots
