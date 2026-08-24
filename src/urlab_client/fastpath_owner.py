@@ -784,15 +784,19 @@ class FastPathOwner:
         """Serve this owner over gRPC too (mirrors subscribe + perturb over gRPC,
         not just ZMQ). Returns the ``host:port`` it listens on. Idempotent."""
         if self._grpc_server is not None:
-            return self._grpc_server.endpoint
+            return self._grpc_endpoint
         from .owner_server import OwnerGrpcServer
 
         self._grpc_server = OwnerGrpcServer(self, port=port, bind=bind)
         self._grpc_server.start()
-        # Advertise the gRPC endpoint in the registry for discovery.
+        # Advertise the gRPC endpoint in the registry for discovery. This is
+        # the dialable host:port (resolved advertise_host), not the server's
+        # own `.endpoint` (built from `bind`, e.g. "0.0.0.0:port") — callers
+        # dial the return value of this method, so it must match what the
+        # registry/`grpc_endpoint` property advertise.
         self._grpc_endpoint = f"{self._host}:{port}"
         self._write_registry()
-        return self._grpc_server.endpoint
+        return self._grpc_endpoint
 
     # -- lifecycle ---------------------------------------------------------- #
     def close(self) -> None:

@@ -22,8 +22,9 @@ registry -- one schema, one writer per repo, one filter") and
   * addendum §C.2 ("systemic patterns"): "Same concept, N copies... endpoint/
     host parse (×5)... No single source of truth for addressing/parsing" --
     `pool._parse_endpoint`, `render_pool.parse_endpoints` and
-    `session._owner_from_endpoint` each independently strip a URI scheme
-    before splitting host:port.
+    `session._owner_from_endpoint` now all route through the shared,
+    scheme-agnostic `pool.parse_host_port` SSOT helper, so they agree on the
+    parsed (host, port) for any endpoint scheme (tcp/grpc/shm/bare).
   * `capability_naming_proposal.md` §4.6: the registry `capabilities` key
     means two different things across writers -- UE's (non-broadcasting)
     list is protocol/transport features (`render_sync`, `shm_rpc`, ...);
@@ -299,14 +300,14 @@ def test_endpoint_parse_agrees_for_bare_and_tcp_forms(endpoint):
     assert pool_port == rp_spec.port == int(owner_port) == 6000
 
 
-def test_endpoint_parse_disagrees_for_grpc_scheme():
-    """EXPECTED FAIL (addendum §C.2 systemic pattern: "Same concept, N copies
-    ... endpoint/host parse (×5) ... No single source of truth for
-    addressing/parsing/decoding"). `pool._parse_endpoint` uses `urlparse`,
-    which strips ANY scheme; `render_pool.parse_endpoints` and
-    `session._owner_from_endpoint` only special-case stripping a literal
-    "tcp://" prefix, so a "grpc://" endpoint leaks the scheme into the host.
-    Intended behaviour: every one of the ×5 parsers resolves the same
+def test_endpoint_parse_agrees_for_grpc_scheme():
+    """Fixed (addendum §C.2 systemic pattern: "Same concept, N copies ...
+    endpoint/host parse (×5) ... No single source of truth for
+    addressing/parsing/decoding"). `pool._parse_endpoint`,
+    `render_pool.parse_endpoints` and `session._owner_from_endpoint` all now
+    route through the shared `pool.parse_host_port` (urlparse-based, scheme
+    agnostic) helper, so a "grpc://" endpoint no longer leaks its scheme into
+    the parsed host: every one of the ×5 parsers resolves the same
     (host, port) for the same endpoint string, regardless of scheme.
     """
     endpoint = "grpc://host:6000"

@@ -44,6 +44,7 @@ from .pool import (
     _normalize_time,
     default_registry_dir,
     is_owner_entry,
+    parse_host_port,
     pid_alive,
 )
 
@@ -88,7 +89,8 @@ class OwnerInfo:
 def _host_of(endpoint: Optional[str]) -> str:
     if not endpoint:
         return ""
-    return endpoint.replace("tcp://", "", 1).split("/", 1)[0].split(":", 1)[0]
+    host, _ = parse_host_port(endpoint)
+    return host
 
 
 def _owner_from_entry(data: dict) -> Optional[OwnerInfo]:
@@ -119,10 +121,8 @@ def _owner_from_entry(data: dict) -> Optional[OwnerInfo]:
 
 def _owner_from_endpoint(ep: str) -> OwnerInfo:
     """An explicitly-given endpoint (assumed a gRPC host:port)."""
-    s = ep.replace("tcp://", "", 1)
-    host, _, port = s.rpartition(":")
+    host, port = parse_host_port(ep, default_port=DEFAULT_GRPC_PORT)
     host = host or "127.0.0.1"
-    port = port or str(DEFAULT_GRPC_PORT)
     return OwnerInfo(
         instance_id=f"{host}:{port}", host=host, scene="(explicit)",
         transports=("grpc",), grpc=f"{host}:{port}", source="endpoint",

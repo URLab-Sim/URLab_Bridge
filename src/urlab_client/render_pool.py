@@ -46,6 +46,7 @@ import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Union
 
+from .pool import parse_host_port
 from .render_client import (
     USER_CAMERA,
     CameraFrame,
@@ -112,14 +113,8 @@ def parse_endpoints(spec: Union[str, Sequence[EndpointLike]]) -> List[InstanceSp
             host, port = it
             out.append(InstanceSpec(str(host), int(port)))
         else:
-            s = str(it).strip()
-            if s.startswith("tcp://"):
-                s = s[len("tcp://"):]
-            if ":" in s:
-                host, _, p = s.rpartition(":")
-                out.append(InstanceSpec(host, int(p)))
-            else:
-                out.append(InstanceSpec(s, DEFAULT_GRPC_PORT))
+            host, port = parse_host_port(str(it), default_port=DEFAULT_GRPC_PORT)
+            out.append(InstanceSpec(host, int(port)))
     if not out:
         raise ValueError("no endpoints parsed")
     return out

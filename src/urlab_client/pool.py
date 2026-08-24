@@ -172,15 +172,36 @@ def _normalize_time(v: Any) -> Optional[float]:
     return None
 
 
-def _parse_endpoint(endpoint: str) -> Tuple[str, int]:
-    """Split ``host:port`` / ``tcp://host:port`` into ``(host, port)``. A bare
-    ``host`` (no port) defaults to the standard step port."""
+def parse_host_port(
+    endpoint: str, default_port: Optional[int] = None
+) -> Tuple[str, Optional[int]]:
+    """Split ``host:port`` / ``scheme://host:port`` into ``(host, port)``.
+
+    Single source of truth for endpoint/host parsing (addendum §C.2: this
+    concept was duplicated ×5 across ``pool``, ``render_pool`` and
+    ``session``, each stripping schemes differently -- ``pool`` handled any
+    ``scheme://`` via :func:`urllib.parse.urlparse`, while the others only
+    special-cased a literal ``"tcp://"`` prefix, so e.g. a ``"grpc://"``
+    endpoint leaked into the parsed host there). ``urlparse`` is scheme
+    agnostic, so this handles ``tcp://``, ``grpc://``, ``shm://`` and any
+    other scheme, as well as bare ``host:port`` / ``host``.
+
+    A bare ``host`` (no port) returns ``default_port`` (``None`` if not
+    given) as the port.
+    """
     text = endpoint.strip()
     if "://" not in text:
         text = "tcp://" + text
     parsed = urlparse(text)
     host = parsed.hostname or "localhost"
-    port = parsed.port if parsed.port is not None else DEFAULT_PORT_BASE
+    port = parsed.port if parsed.port is not None else default_port
+    return host, port
+
+
+def _parse_endpoint(endpoint: str) -> Tuple[str, int]:
+    """Split ``host:port`` / ``tcp://host:port`` into ``(host, port)``. A bare
+    ``host`` (no port) defaults to the standard step port."""
+    host, port = parse_host_port(endpoint, default_port=DEFAULT_PORT_BASE)
     return host, int(port)
 
 
@@ -538,6 +559,7 @@ __all__ = [
     "URLabPool",
     "default_registry_dir",
     "is_owner_entry",
+    "parse_host_port",
     "pid_alive",
     "read_registry",
 ]
