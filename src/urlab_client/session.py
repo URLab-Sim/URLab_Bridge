@@ -37,10 +37,15 @@ import json
 import os
 import socket
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import List, Optional, Sequence, Tuple
 
-from .pool import OWNER_ROLE, default_registry_dir, is_owner_entry, pid_alive
+from .pool import (
+    OWNER_ROLE,
+    _normalize_time,
+    default_registry_dir,
+    is_owner_entry,
+    pid_alive,
+)
 
 __all__ = ["OwnerInfo", "discover_owners", "format_table", "OWNER_ROLE"]
 
@@ -60,6 +65,7 @@ class OwnerInfo:
     bus: Optional[str] = None       # ZMQ viewer PUB (tcp://host:port)
     control: Optional[str] = None   # ZMQ control REP (tcp://host:port)
     grpc: Optional[str] = None      # host:port
+    ngeom: int = 0
     pid: Optional[int] = None
     updated: Optional[float] = None  # epoch seconds (normalized)
     source: str = "registry"
@@ -77,18 +83,6 @@ class OwnerInfo:
         if "grpc" in self.transports or self.grpc:
             return "grpc"
         return "zmq"
-
-
-def _normalize_time(v) -> Optional[float]:
-    """Registry timestamps are int-epoch (Python owner) or ISO8601 (UE)."""
-    if isinstance(v, (int, float)):
-        return float(v)
-    if isinstance(v, str):
-        try:
-            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            return None
-    return None
 
 
 def _host_of(endpoint: Optional[str]) -> str:
@@ -116,6 +110,7 @@ def _owner_from_entry(data: dict) -> Optional[OwnerInfo]:
         bus=data.get("bus"),
         control=data.get("control"),
         grpc=data.get("grpc"),
+        ngeom=int(data.get("ngeom", 0) or 0),
         pid=data.get("pid") if isinstance(data.get("pid"), int) else None,
         updated=_normalize_time(data.get("registry_written_at")),
         source="registry",

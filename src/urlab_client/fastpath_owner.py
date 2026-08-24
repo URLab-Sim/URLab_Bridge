@@ -172,17 +172,32 @@ class FastPathOwner:
         self._pert = None          # mujoco.MjvPerturb
         self._pert_scene = None    # throwaway mjvScene (only pert.scale uses it)
         self._pert_sel = None      # body id localmass was last initialised for
-        # Latest per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?}) cached
-        # for a gRPC subscribe(format=render) stream -- the true mirror payload
-        # (viewer runs zero MuJoCo). Written by every publish_bodies/publish_mjdata.
-        self._latest_transforms: "Optional[dict]" = None
-        # Debug-tier caps a render subscriber negotiated (source-of-truth §8.2).
-        # Defaults to none so a lean mirror pays zero extra bytes; a subscribe
-        # request populates it via set_render_debug_caps and it gates what
-        # _append_render_debug_fields serializes onto every published frame.
+        # Latest LEAN per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?})
+        # -- transforms only, NEVER the debug tier. This is what the always-on ZMQ
+        # `render` topic carries (it has no way to negotiate the debug tier) and the
+        # base every gRPC subscribe(format=render) stream augments per ITS OWN caps.
+        # Written by every publish_bodies/publish_mjdata.
+        self._latest_lean: "Optional[dict]" = None
+        # The (model, data) behind `_latest_lean`, kept so a gRPC stream can compute
+        # the debug tier (§8.2) for its own subscription off the latest post-step
+        # state. None for publish_bodies (no mjData -> transforms only).
+        self._latest_model = None
+        self._latest_data = None
+        # Debug-tier caps (source-of-truth §8.2). This is NOT a per-subscription
+        # value any more -- each gRPC stream carries its own caps (owner_server.py
+        # `_stream_render`). This field is the AGGREGATE of all currently-active
+        # render subscribers (union of their caps), recomputed on every
+        # register/unregister, and gates only the shared `latest_transforms()`
+        # cache view -- so it goes back to lean the moment the last debug
+        # subscriber disconnects. `set_render_debug_caps` still writes it directly
+        # for callers that set caps without going through the subscriber registry.
         self._render_debug_caps: dict = {
             "contacts": False, "overlay": False, "max_contacts": 0,
         }
+        # Active render subscriptions -> their negotiated caps (token-keyed), so the
+        # aggregate can be recomputed when any one connects/disconnects.
+        self._render_subscribers: "dict[int, dict]" = {}
+        self._render_sub_next = 0
         self._grpc_server = None  # optional; started by start_grpc_server()
         self._grpc_endpoint: Optional[str] = None
         self._write_registry()
@@ -487,11 +502,74 @@ class FastPathOwner:
         mujoco.mjv_applyPerturbForce(model, data, pert)
 
     def latest_transforms(self) -> "Optional[dict]":
-        """The most recent per-body transform frame ({f,bxpos,bxquat,cxpos?,cxquat?})
-        published via :meth:`publish_bodies`/:meth:`publish_mjdata`, or None. Read by
-        a gRPC subscribe(format=render) stream; thread-safe (returns a copy)."""
+        """The most recent per-body transform frame, augmented with the debug tier
+        for the AGGREGATE of currently-active render subscribers (none -> lean). A
+        diagnostic view of the shared cache; each gRPC stream builds its own frame
+        via :meth:`render_frame_for_caps`. Thread-safe (returns a fresh copy)."""
         with self._lock:
-            return dict(self._latest_transforms) if self._latest_transforms else None
+            caps = dict(self._render_debug_caps)
+        return self.render_frame_for_caps(caps)
+
+    def render_frame_for_caps(self, caps=None) -> "Optional[dict]":
+        """Return a fresh copy of the latest LEAN transform frame, with the
+        capability-gated debug tier (§8.2) appended for *this caller's* ``caps``
+        only -- computed from the latest post-step ``model``/``data``. Returns None
+        before the first publish. This is the per-subscription frame builder: two
+        subscribers with different caps get different frames from the same publish,
+        and the shared lean base is never mutated."""
+        with self._lock:
+            if self._latest_lean is None:
+                return None
+            frame = dict(self._latest_lean)
+            model = self._latest_model
+            data = self._latest_data
+        caps = self.parse_render_debug_caps(caps) if caps is not None else None
+        self._append_render_debug_fields(frame, model, data, caps)
+        return frame
+
+    # -- per-subscription debug caps registry ------------------------------- #
+    def _recompute_aggregate_caps_locked(self) -> None:
+        """Recompute `_render_debug_caps` as the union of all active subscribers'
+        caps (call with `self._lock` held). With no subscribers this resets to
+        lean, so the shared cache stops paying for the debug tier the instant the
+        last debug subscriber disconnects."""
+        contacts = overlay = False
+        maxc = 0
+        unlimited = False
+        for c in self._render_subscribers.values():
+            contacts = contacts or bool(c.get("contacts"))
+            overlay = overlay or bool(c.get("overlay"))
+            mc = int(c.get("max_contacts") or 0)
+            if mc == 0:
+                unlimited = True  # 0 == "no cap" -> the widest request wins
+            else:
+                maxc = max(maxc, mc)
+        self._render_debug_caps = {
+            "contacts": contacts,
+            "overlay": overlay,
+            "max_contacts": 0 if unlimited else maxc,
+        }
+
+    def register_render_subscriber(self, caps) -> int:
+        """Register an active render subscription with its negotiated caps; returns
+        a token to pass to :meth:`unregister_render_subscriber` when it ends. The
+        caps are per-subscription (used by that stream alone); registration only
+        keeps the aggregate view (`latest_transforms`) in sync."""
+        caps = self.parse_render_debug_caps(caps)
+        with self._lock:
+            token = self._render_sub_next
+            self._render_sub_next += 1
+            self._render_subscribers[token] = caps
+            self._recompute_aggregate_caps_locked()
+        return token
+
+    def unregister_render_subscriber(self, token: int) -> None:
+        """Drop a subscription (on stream end/disconnect) and recompute the
+        aggregate caps, so a disconnect never leaves the debug tier enabled for
+        the shared cache once nobody is asking for it."""
+        with self._lock:
+            self._render_subscribers.pop(token, None)
+            self._recompute_aggregate_caps_locked()
 
     # -- transform bus ------------------------------------------------------ #
     def _build_render_frame(self, payload: dict, cxpos, cxquat, usercam=None) -> dict:
@@ -636,26 +714,30 @@ class FastPathOwner:
 
     def _send_transforms(self, payload: dict, cxpos, cxquat, usercam=None,
                          model=None, data=None) -> None:
-        """Build one render-tier frame and publish it on the ``render`` topic.
+        """Build one LEAN render-tier frame and publish it on the ``render`` topic.
         Best-effort: a slow/absent renderer never stalls the sim.
 
-        ``model``/``data``, when given (via :meth:`publish_mjdata`), let the
-        capability-gated debug tier (§8.2) be appended for whatever a subscriber
-        negotiated; without them only the transform tier is published."""
+        ``model``/``data``, when given (via :meth:`publish_mjdata`), are cached
+        alongside the lean frame so a gRPC subscriber can compute the
+        capability-gated debug tier (§8.2) for its OWN subscription later
+        (:meth:`render_frame_for_caps`). The debug tier is never appended here, so
+        the ZMQ topic and a lean mirror always pay zero extra bytes."""
         frame = self._build_render_frame(payload, cxpos, cxquat, usercam)
-        # Append the debug tier for whatever a render subscriber negotiated
-        # (set_render_debug_caps records it off the subscribe request). Default is
-        # none, so a lean mirror -- and the topic-per-tier ZMQ bus, which advertises
-        # the render tier only -- pays zero extra bytes. The cached frame below is
-        # re-used byte-for-byte by a gRPC subscribe(format=render) stream.
+        # The frame is LEAN (transforms only). The debug tier (§8.2) is NEVER
+        # appended here: it is per-subscription and can only be negotiated over
+        # gRPC, so each gRPC stream appends its own via `render_frame_for_caps`.
+        # This keeps the always-on ZMQ `render` topic -- which has no way to ask
+        # for the debug tier -- paying zero extra bytes regardless of any gRPC
+        # subscriber, and lets a lean gRPC mirror do the same.
+        #
+        # Cache the lean base + the (model, data) behind it, so a gRPC stream can
+        # compute the debug tier for its OWN caps off the latest post-step state.
         with self._lock:
-            caps = dict(self._render_debug_caps)
-        self._append_render_debug_fields(frame, model, data, caps)
-        # Cache the fully-assembled frame for a gRPC subscribe(format=render) stream,
-        # so a gRPC mirror gets byte-identical frames to a ZMQ mirror. The ZMQ
-        # publish below stays independent + best-effort.
-        with self._lock:
-            self._latest_transforms = dict(frame)
+            self._latest_lean = dict(frame)
+            self._latest_model = model
+            self._latest_data = data
+        # Publish the LEAN frame on the ZMQ bus (best-effort; a slow/absent
+        # renderer never stalls the sim).
         try:
             self._pub.send_multipart(
                 [b"render", msgpack.packb(frame, use_bin_type=True)],

@@ -38,6 +38,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import urlparse
 
@@ -151,6 +152,26 @@ def _derive_ports(
     return root, root + 1, root + 2
 
 
+def _normalize_time(v: Any) -> Optional[float]:
+    """Normalize a registry ``registry_written_at`` value to epoch seconds.
+
+    The Python writer (fastpath_owner.py) stamps int/float epoch seconds; the
+    UE writer (InstanceRegistry.cpp) stamps ``FDateTime::UtcNow().ToIso8601()``.
+    Both readers are meant to agree on one schema (source-of-truth §12), so
+    this mirrors ``session._normalize_time`` exactly rather than
+    ``InstanceInfo.from_registry`` silently dropping the UE (ISO-8601) shape
+    to ``None``.
+    """
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
 def _parse_endpoint(endpoint: str) -> Tuple[str, int]:
     """Split ``host:port`` / ``tcp://host:port`` into ``(host, port)``. A bare
     ``host`` (no port) defaults to the standard step port."""
@@ -184,6 +205,7 @@ class InstanceInfo:
     busy: bool = False
     urlab_version: str = ""
     capabilities: Tuple[str, ...] = ()
+    ngeom: int = 0
     registry_written_at: Optional[float] = None
     source: str = "registry"
     registry_path: Optional[str] = None
@@ -239,11 +261,8 @@ class InstanceInfo:
             busy=bool(data.get("busy", False)),
             urlab_version=str(data.get("urlab_version", "") or ""),
             capabilities=tuple(str(c) for c in caps),
-            registry_written_at=(
-                float(data["registry_written_at"])
-                if isinstance(data.get("registry_written_at"), (int, float))
-                else None
-            ),
+            ngeom=int(data.get("ngeom", 0) or 0),
+            registry_written_at=_normalize_time(data.get("registry_written_at")),
             source="registry",
             registry_path=path,
             registry_mtime=mtime,
@@ -275,11 +294,8 @@ class InstanceInfo:
             busy=bool(data.get("busy", False)),
             urlab_version=str(data.get("urlab_version", "") or ""),
             capabilities=tuple(str(c) for c in caps),
-            registry_written_at=(
-                float(data["registry_written_at"])
-                if isinstance(data.get("registry_written_at"), (int, float))
-                else None
-            ),
+            ngeom=int(data.get("ngeom", 0) or 0),
+            registry_written_at=_normalize_time(data.get("registry_written_at")),
             source="static",
         )
 

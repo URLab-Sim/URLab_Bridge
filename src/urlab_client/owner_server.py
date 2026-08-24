@@ -87,17 +87,24 @@ class _OwnerServicer:
                 # requests).
                 #
                 # Parse the debug-tier caps off the subscribe request (§8.2:
-                # {contacts, overlay, maxcontacts}) and record them on the owner so
-                # every published frame carries exactly the wanted debug fields --
-                # count-capped, and zero extra bytes when the subscriber asks for
-                # none.
+                # {contacts, overlay, maxcontacts}). These are PER-SUBSCRIPTION:
+                # this stream appends exactly the wanted debug fields for ITS OWN
+                # frames only (count-capped, zero extra bytes when none asked) --
+                # never for any other subscriber, and never onto the shared ZMQ
+                # topic. Register the subscription so the owner's aggregate view
+                # stays in sync, and unregister on stream end so a disconnect
+                # resets the tier for everyone.
                 try:
                     sub_req = msgpack.unpackb(
                         bytes(pkt.payload), raw=False, strict_map_key=False)
                 except Exception:  # noqa: BLE001
                     sub_req = {}
-                self._owner.set_render_debug_caps(sub_req)
-                yield from self._stream_render(context, pkt.sequence_id)
+                caps = self._owner.parse_render_debug_caps(sub_req)
+                token = self._owner.register_render_subscriber(caps)
+                try:
+                    yield from self._stream_render(context, pkt.sequence_id, caps)
+                finally:
+                    self._owner.unregister_render_subscriber(token)
                 return
             reply = self._dispatch(op, bytes(pkt.payload))
             yield self._wrap(op, pkt.sequence_id, reply)
@@ -137,14 +144,17 @@ class _OwnerServicer:
         return msgpack.packb(
             {"ok": False, "error": f"unknown op {op!r}"}, use_bin_type=True)
 
-    def _stream_render(self, context, seq: int):
+    def _stream_render(self, context, seq: int, caps=None):
         # Render tier (format=render): the true mirror payload -- per-body
-        # bxpos/bxquat (+ optional camera transforms + optional debug fields). The
-        # viewer applies them directly and runs zero MuJoCo. Same frames a ZMQ
-        # 'render' subscriber gets.
+        # bxpos/bxquat (+ optional camera transforms + the debug tier for THIS
+        # subscription's negotiated `caps` only). The viewer applies them directly
+        # and runs zero MuJoCo. A lean subscriber (caps off) gets exactly the
+        # frames a ZMQ 'render' subscriber gets; a debug subscriber additionally
+        # gets its own §8.2 fields -- without changing what any other subscriber,
+        # or the ZMQ topic, receives.
         last_f = None
         while context.is_active():
-            fr = self._owner.latest_transforms()
+            fr = self._owner.render_frame_for_caps(caps)
             if fr is not None and fr.get("f") != last_f:
                 last_f = fr.get("f")
                 yield self._wrap("view_frame", seq,
