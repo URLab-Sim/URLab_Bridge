@@ -183,6 +183,15 @@ class FastPathOwner:
         # state. None for publish_bodies (no mjData -> transforms only).
         self._latest_model = None
         self._latest_data = None
+        # Per-publish frame cache keyed by caps-key (`_caps_key`): the lean frame
+        # under the None key, plus one pre-built debug frame per DISTINCT active
+        # subscriber caps-set (usually 1-2). Built ONCE per publish on the owner's
+        # main thread in `_send_transforms`, off the SAME (model, data) snapshot as
+        # the transforms -- so the debug fields are consistent with the frame, and
+        # the gRPC stream thread only ever RE-SENDS a cached frame (a cheap dict
+        # copy) instead of rebuilding the debug tier on every ~200 Hz poll (which
+        # held the GIL on the stream thread and starved the owner's step loop).
+        self._latest_frames: "dict" = {}
         # Debug-tier caps (source-of-truth §8.2). This is NOT a per-subscription
         # value any more -- each gRPC stream carries its own caps (owner_server.py
         # `_stream_render`). This field is the AGGREGATE of all currently-active
@@ -510,21 +519,49 @@ class FastPathOwner:
             caps = dict(self._render_debug_caps)
         return self.render_frame_for_caps(caps)
 
+    @staticmethod
+    def _caps_key(caps) -> "Optional[tuple]":
+        """Canonical hashable key for a parsed caps dict, used to index the
+        per-publish frame cache. Lean (no contacts AND no overlay) collapses to
+        ``None`` so every lean subscriber -- and the always-on ZMQ topic -- share
+        the single cached lean frame. Two subscribers negotiating the same debug
+        tier collapse to the same key, so it is built (and cached) exactly once."""
+        if not caps or not (caps.get("contacts") or caps.get("overlay")):
+            return None
+        return (
+            bool(caps.get("contacts")),
+            bool(caps.get("overlay")),
+            int(caps.get("max_contacts") or 0),
+        )
+
     def render_frame_for_caps(self, caps=None) -> "Optional[dict]":
-        """Return a fresh copy of the latest LEAN transform frame, with the
-        capability-gated debug tier (§8.2) appended for *this caller's* ``caps``
-        only -- computed from the latest post-step ``model``/``data``. Returns None
-        before the first publish. This is the per-subscription frame builder: two
-        subscribers with different caps get different frames from the same publish,
-        and the shared lean base is never mutated."""
+        """Return a fresh copy of the frame this caller's ``caps`` should receive
+        for the latest publish. In the common case this is a CHEAP DICT COPY of a
+        frame already built once per publish in :meth:`_send_transforms` (lean under
+        the ``None`` key, or the pre-built debug frame whose caps match) -- the poll
+        path does NOT rebuild the debug tier, so a ~200 Hz gRPC stream never holds
+        the GIL doing per-poll MuJoCo work and never starves the owner's step loop.
+
+        Returns None before the first publish. Two subscribers with different caps
+        get different cached frames from the same publish, and the shared lean base
+        is never mutated. If a caller's exact caps-set was not pre-built for this
+        publish (rare: a subset differing from every active subscriber, e.g. the
+        first poll of a just-registered subscriber before the next publish), this
+        falls back to building the debug tier once from the latest snapshot."""
+        parsed = self.parse_render_debug_caps(caps) if caps is not None else None
+        key = self._caps_key(parsed)
         with self._lock:
             if self._latest_lean is None:
                 return None
+            cached = self._latest_frames.get(key)
+            if cached is not None:
+                return dict(cached)  # common path: re-send a pre-built frame
+            # Fallback (rare): caps not pre-built for this publish. Build once from
+            # the latest snapshot; the next publish will cache this caps-set.
             frame = dict(self._latest_lean)
             model = self._latest_model
             data = self._latest_data
-        caps = self.parse_render_debug_caps(caps) if caps is not None else None
-        self._append_render_debug_fields(frame, model, data, caps)
+        self._append_render_debug_fields(frame, model, data, parsed)
         return frame
 
     # -- per-subscription debug caps registry ------------------------------- #
@@ -549,6 +586,23 @@ class FastPathOwner:
             "overlay": overlay,
             "max_contacts": 0 if unlimited else maxc,
         }
+
+    def _active_debug_caps_sets_locked(self) -> "dict":
+        """The DISTINCT non-lean caps-sets a publish must pre-build a debug frame
+        for (call with `self._lock` held): every active render subscriber's caps,
+        plus the directly-set aggregate (`_render_debug_caps`) so callers that set
+        caps without registering a subscriber -- e.g. `set_render_debug_caps`, used
+        by `latest_transforms()` -- also get a cached frame. Keyed by `_caps_key`,
+        so identical caps-sets collapse to one build. Usually 0-2 entries."""
+        sets: "dict" = {}
+        for caps in self._render_subscribers.values():
+            key = self._caps_key(caps)
+            if key is not None:
+                sets[key] = caps
+        key = self._caps_key(self._render_debug_caps)
+        if key is not None:
+            sets[key] = dict(self._render_debug_caps)
+        return sets
 
     def register_render_subscriber(self, caps) -> int:
         """Register an active render subscription with its negotiated caps; returns
@@ -732,10 +786,27 @@ class FastPathOwner:
         #
         # Cache the lean base + the (model, data) behind it, so a gRPC stream can
         # compute the debug tier for its OWN caps off the latest post-step state.
+        lean = dict(frame)
+        # Snapshot which distinct debug caps-sets are currently wanted (subscribers
+        # + directly-set aggregate). Do the (potentially expensive) debug-tier build
+        # ONCE PER PUBLISH here on the main thread, off THIS publish's (model, data)
+        # -- so every cached debug frame is consistent with the transforms, and the
+        # gRPC stream thread only ever re-sends a cached frame (never rebuilds the
+        # debug tier on its ~200 Hz poll). Building outside the lock keeps the lock
+        # hold to the cheap dict swap below; model/data are this publish's args, not
+        # shared owner state, so no lock is needed to read them here.
         with self._lock:
-            self._latest_lean = dict(frame)
+            caps_sets = self._active_debug_caps_sets_locked()
+        frames: "dict" = {None: lean}
+        for key, caps in caps_sets.items():
+            dbg = dict(lean)
+            self._append_render_debug_fields(dbg, model, data, caps)
+            frames[key] = dbg
+        with self._lock:
+            self._latest_lean = lean
             self._latest_model = model
             self._latest_data = data
+            self._latest_frames = frames
         # Publish the LEAN frame on the ZMQ bus (best-effort; a slow/absent
         # renderer never stalls the sim).
         try:
