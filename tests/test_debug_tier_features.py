@@ -25,6 +25,7 @@ from __future__ import annotations
 import concurrent.futures
 import socket
 import time
+from unittest import mock
 
 import msgpack
 import pytest
@@ -368,4 +369,67 @@ def test_zmq_render_topic_does_not_leak_grpc_debug_tier(tmp_path, scene):
     finally:
         if channel is not None:
             channel.close()
+        owner.close()
+
+
+# --------------------------------------------------------------------------- #
+# Perf-cadence guard: the debug tier is built ONCE per publish, never per poll.
+# --------------------------------------------------------------------------- #
+
+def test_render_frame_for_caps_does_not_rebuild_debug_tier_on_poll(tmp_path, scene):
+    """Guards the "debug tier built once per publish, not per gRPC poll" perf
+    invariant behind a real (now-fixed) regression: a gRPC render stream polls
+    `render_frame_for_caps` at ~200 Hz, far faster than the owner publishes.
+    The fix makes `_send_transforms` build each active caps-set's debug frame
+    ONCE per publish into `self._latest_frames`, and `render_frame_for_caps`
+    must then serve a cheap dict copy from that cache -- NOT call the
+    expensive `_append_render_debug_fields` builder again on every poll.
+    Before the fix, every poll rebuilt the full debug tier (contacts loop +
+    overlay arrays) on the gRPC stream thread, holding the GIL and starving
+    the owner's main step loop -- this is the stutter regression.
+
+    This test registers a debug-caps subscriber (contacts+overlay, mirroring
+    the per-subscriber tests above), does ONE publish so the per-publish cache
+    is populated, then polls `render_frame_for_caps` 50 times -- simulating 50
+    ~200 Hz polls landing between publishes -- with `_append_render_debug_fields`
+    wrapped in a call-counting spy. It asserts the spy saw ZERO calls across
+    all 50 polls, and that every polled frame still carries the debug-tier
+    keys (proving it served the cached DEBUG frame, not a lean one -- so the
+    zero-calls assertion can't pass trivially by returning lean data).
+    """
+    model, data = scene
+    owner = _make_owner(tmp_path)
+    caps = {"contacts": True, "overlay": True, "maxcontacts": 0}
+    token = None
+    try:
+        token = owner.register_render_subscriber(caps)
+        # ONE publish: builds the per-publish debug-frame cache for this
+        # caps-set inside `_send_transforms`.
+        owner.publish_mjdata(1, model, data)
+
+        parsed = owner.parse_render_debug_caps(caps)
+        real_builder = owner._append_render_debug_fields
+        with mock.patch.object(
+            owner, "_append_render_debug_fields", side_effect=real_builder,
+        ) as spy:
+            # Simulate 50 ~200 Hz gRPC polls happening between publishes.
+            polled_frames = [owner.render_frame_for_caps(parsed) for _ in range(50)]
+
+        assert spy.call_count == 0, (
+            f"_append_render_debug_fields was called {spy.call_count} times across "
+            "50 polls between publishes -- the debug tier must be served from the "
+            "cache built once per publish in _send_transforms, not rebuilt on every "
+            "gRPC poll (this is the stutter regression: it holds the GIL on the "
+            "stream thread and starves the owner's step loop)"
+        )
+        for frame in polled_frames:
+            assert frame is not None
+            assert "contacts" in frame and "xfrc_applied" in frame, (
+                "polled frame is missing debug-tier keys -- the zero-rebuild "
+                "assertion above would pass trivially if polls were serving a "
+                "lean frame instead of the cached debug frame"
+            )
+    finally:
+        if token is not None:
+            owner.unregister_render_subscriber(token)
         owner.close()
