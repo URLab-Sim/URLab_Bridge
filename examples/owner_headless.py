@@ -21,6 +21,7 @@ import time
 import mujoco
 import numpy as np
 
+from urlab_client import viewer_sync
 from urlab_client._model_upload import flatten_model
 from urlab_client.fastpath_owner import FastPathOwner
 
@@ -53,14 +54,23 @@ def main() -> None:
 
     t0 = time.time()
 
-    def step(frame: int) -> None:
+    def step(frame: int, usercam=None, pert=None) -> None:
         data.xfrc_applied[:] = 0.0
-        owner.apply_perturbations(model, data)          # forwarded drag intents
+        owner.apply_perturbations(model, data)          # drag intents forwarded from the UE mirror
+        # Local ctrl-drag in the MuJoCo passive window: the viewer records it in
+        # handle.perturb but (unlike simulate) does not apply it -- our step loop
+        # owns physics, so we apply it here, exactly as simulate does.
+        if pert is not None:
+            mujoco.mjv_applyPerturbPose(model, data, pert, 0)   # mocap / kinematic drag
+            mujoco.mjv_applyPerturbForce(model, data, pert)     # dynamic-body spring
         if model.nu:
             data.ctrl[:] = 0.6 * np.sin(np.arange(model.nu) * 0.7 + (time.time() - t0))
         mujoco.mj_step(model, data)
         owner.serve_pending()                            # zmq control (best-effort)
-        owner.publish_mjdata(frame, model, data)         # render tier (+ debug tier if negotiated)
+        # usercam (ucpos/ucfwd/ucup): the passive viewer's free-camera pose. The UE
+        # mirror's copycat (ApplyUserCamera -> SetViewTarget) points its viewport at
+        # the same eye, so orbiting the MuJoCo window orbits the UE view in lockstep.
+        owner.publish_mjdata(frame, model, data, usercam=usercam)  # render tier (+ debug tier)
         time.sleep(model.opt.timestep)
 
     frame = 0
@@ -69,9 +79,11 @@ def main() -> None:
             # `from ... import ... as` binds a NEW name -- a bare `import mujoco.viewer`
             # here would rebind `mujoco` as a function-local and shadow the module.
             from mujoco import viewer as mjviewer
+            scn = viewer_sync.make_scene(model)          # reused each frame (no per-call alloc)
             with mjviewer.launch_passive(model, data) as viewer:
                 while viewer.is_running():
-                    step(frame)
+                    step(frame, viewer_sync.pose_from_passive(viewer, scene=scn),
+                         viewer.perturb)                 # local ctrl-drag in this window
                     viewer.sync()                        # ground-truth MuJoCo render
                     frame += 1
         else:
