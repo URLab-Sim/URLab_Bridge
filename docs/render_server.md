@@ -52,8 +52,8 @@ editing the XML and recompiling — no recook needed.
 
 ```bash
 url_proj.exe /Game/FirstPerson/Lvl_FirstPerson \
-  -URLabFastMjb=scene.mjb -URLabFastCameras -URLabFastForcedOnly \
-  -URLabFastCamMaxHeight=0 -RenderOffScreen -nosplash -abslog=server.log
+  -URLabDrive=push -URLabModel=scene.mjb -URLabCaps=serve,cameras \
+  -URLabScene=cammax=0 -RenderOffScreen -nosplash -abslog=server.log
 ```
 
 Key flags:
@@ -61,10 +61,10 @@ Key flags:
 | flag | meaning |
 |------|---------|
 | `<map>` | **use a lit level** (SkyLight + reflection captures) or metallic surfaces look flat. `/Game/FirstPerson/Lvl_FirstPerson` is lit; `/Engine/Maps/Entry` is not. |
-| `-URLabFastMjb=<file>` | model to load |
-| `-URLabFastForcedOnly` | forced/eval regime — the bridge serves `fastpath_render` |
-| `-URLabFastCameras` | enable camera capture |
-| `-URLabFastCamMaxHeight=N` | camera height cap; `0` = honour the model resolution exactly (else clamps, default 480) |
+| `-URLabModel=<file>` | model to load (formerly `-URLabFastMjb`; format from the `.mjb`/`.xml`/`.mjz` extension) |
+| `-URLabDrive=push` | forced/eval regime — the bridge serves `fastpath_render` (formerly `-URLabFastForcedOnly`) |
+| `-URLabCaps=serve,cameras` | serve the render bridge and enable camera capture (`cameras` formerly `-URLabFastCameras`) |
+| `-URLabScene=cammax=N` | camera height cap; `0` = honour the model resolution exactly (else clamps, default 480). Formerly `-URLabFastCamMaxHeight=N` |
 | `-RenderOffScreen` | headless |
 
 Do **not** force low scalability (`sg.*Quality 0`) for a fidelity/viewer run — it drops
@@ -94,7 +94,7 @@ with RenderClient("tcp://127.0.0.1", step_port=5559) as rc:
 API summary (`urlab_client.render_client`):
 
 - `RenderClient(address, step_port=5559, transport="zmq"|"shm")`
-- `.load_mjb(bytes|path)` — hot-swap the model (optional; `-URLabFastMjb` preloads one)
+- `.load_mjb(bytes|path)` — hot-swap the model (optional; `-URLabModel` preloads one)
 - `.render(bxpos, bxquat, cxpos=, cxquat=, cameras=, delay=, sim_time=)` — raw poses
 - `.render_mjdata(model, data, cameras=, delay=)` — convenience from a MuJoCo state
 - `.camera_names()` — authoritative names from the server

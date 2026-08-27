@@ -67,6 +67,6 @@ echo "[demo] camera viewer pid $CAMVIEW (feeds on $CAM_BASE+)"
 # 4) UE editor fast-path renderer + render server (foreground).
 echo "[demo] launching the Unreal editor renderer (auto-discovers the owner)..."
 echo "[demo] >>> In UE, press PLAY to start the live puppet and camera feeds. <<<"
-"$UE" "$UPROJ" -URLabFastDiscover -URLabFastCameras
+"$UE" "$UPROJ" -URLabSourceFind=discover -URLabCaps=cameras
 
 echo "[demo] editor closed; stopping owner + camera viewer."

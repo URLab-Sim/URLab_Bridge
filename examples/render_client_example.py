@@ -6,8 +6,8 @@ Prerequisite: a render server is already running and listening on the step port
 (default 5559). Launch one from a packaged build, e.g.::
 
     url_proj.exe /Game/FirstPerson/Lvl_FirstPerson \
-        -URLabFastMjb=scene.mjb -URLabFastCameras -URLabFastForcedOnly \
-        -URLabFastCamMaxHeight=0 -RenderOffScreen -nosplash
+        -URLabDrive=push -URLabModel=scene.mjb -URLabCaps=serve,cameras \
+        -URLabScene=cammax=0 -RenderOffScreen -nosplash
 
 (See docs/render_server.md for packaging, launch flags, and MJB compilation.)
 

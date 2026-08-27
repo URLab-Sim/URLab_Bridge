@@ -247,7 +247,7 @@ class RenderClient:
     def load_mjb(self, mjb: "bytes | str", *, timeout_ms: int = 120_000) -> None:
         """Hot-swap the server's model with a compiled MJB (raw bytes or a file path).
 
-        Optional -- a server launched with ``-URLabFastMjb=<file>`` already has one.
+        Optional -- a server launched with ``-URLabModel=<file>`` already has one.
         The MJB must be version-matched to the server's MuJoCo (use ``mjbcompile``).
         """
         self.load_model(mjb, format="mjb", timeout_ms=timeout_ms)

@@ -98,8 +98,8 @@ def main() -> None:
     print(f"[owner] transform bus:        {owner.bus_endpoint} (topic 'geoms')")
     print()
     print("A UE fast-path renderer discovers this automatically (server browser")
-    print("or -URLabFastConnect). To connect explicitly, point it at the control")
-    print(f"endpoint: {owner.control_endpoint}")
+    print("or -URLabSourceFind=discover). To connect explicitly, point it at the")
+    print(f"control endpoint with -URLabDrive=stream:{owner.control_endpoint}")
     print("Ctrl-C here to stop.")
     if args.view:
         print("The native MuJoCo viewer (ground truth) opens next to compare "

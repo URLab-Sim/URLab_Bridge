@@ -67,7 +67,7 @@ UPROJECT = os.environ.get(
     "URLAB_UPROJECT",
     r"C:/Users/jonat/Documents/Unreal Projects/url_proj/url_proj.uproject")
 # Curated base level for the render slave (its own lights/props). If set, the
-# slave boots this map with -URLabFastBaseLevel (default lights suppressed) and
+# slave boots this map with -URLabScene=base (default lights suppressed) and
 # runs through the editor so an uncooked project map still loads.
 BASE_MAP = os.environ.get("URLAB_BASE_MAP", "")
 # World spot to drop the MJB at, "X,Y,Z" in UE cm (empty = world origin).
@@ -170,18 +170,28 @@ class Driver:
         if not LAUNCH_LOCAL:
             return
         bus = f"tcp://127.0.0.1:{BUS_PORT}"
+        # serve is implicit for a bus mirror but harmless; keep it for clarity.
+        caps = ["serve"]
+        scene: list[str] = []
+        if SHOW_CAMERAS:
+            caps.append("cameras")
+        if ORIGIN:
+            # -URLabScene origin uses ';' separators (env value is "X,Y,Z").
+            scene.append(f"origin={ORIGIN.replace(',', ';')}")
+        if BASE_MAP:
+            # Uncooked project base map: suppress the default light rig.
+            scene.append("base")
         common = [
-            "-game", f"-URLabFastMjb={initial_mjb}", f"-URLabFastBus={bus}",
+            "-game", f"-URLabDrive=stream:{bus}", f"-URLabModel={initial_mjb}",
+            f"-URLabCaps={','.join(caps)}",
             "-windowed", "-resx=1280", "-resy=720",
         ]
-        if SHOW_CAMERAS:
-            common.append("-URLabFastCameras")
-        if ORIGIN:
-            common.append(f"-URLabFastOrigin={ORIGIN}")
+        if scene:
+            common.append(f"-URLabScene={','.join(scene)}")
         if BASE_MAP:
             # Uncooked project map: run through the editor's -game so its assets
-            # load without a full cook, and suppress the default light rig.
-            args = [UE_EDITOR, UPROJECT, BASE_MAP, "-URLabFastBaseLevel"] + common
+            # load without a full cook.
+            args = [UE_EDITOR, UPROJECT, BASE_MAP] + common
             print(f"[slave] editor -game base level {BASE_MAP} -> bus {bus}")
         else:
             args = [UE_EXE, BOOT_MAP] + common

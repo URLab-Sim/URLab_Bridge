@@ -8,13 +8,14 @@ your state and renders. Everything below goes through the high-level
 
 ## 1. Boot the server (empty level, client-driven)
 
-No model is needed at boot. `-URLabFastServe` stands up the bridge + a renderer
-on an empty level; the client uploads the model over the wire and the server
-(re)builds its renderer from it.
+No model is needed at boot. `-URLabDrive=await` (formerly `-URLabFastServe`)
+stands up the bridge + a renderer on an empty level; the client uploads the
+model over the wire and the server (re)builds its renderer from it. `serve` must
+be in `-URLabCaps` on the await path or the server never binds `:50051`.
 
 ```
 UnrealEditor URLabTest.uproject /Game/FastPath/FastPathRender -game \
-  -URLabFastServe -URLabFastForcedOnly -URLabFastCameras \
+  -URLabDrive=await -URLabCaps=serve,cameras \
   -RenderOffScreen -nosplash -unattended -stdout
 ```
 
@@ -84,7 +85,7 @@ thread a smooth stream needs).
 | | Forced | Viewer / streaming |
 |---|---|---|
 | Client call | `render(..., delay=0)` | `render(..., delay=N)` |
-| Server boot | **with** `-URLabFastForcedOnly` | **without** it |
+| Server boot | `-URLabDrive=await` (delay 0 gives exact forced frames) | `-URLabDrive=await` (same boot; the delay picks the mode) |
 | Frame | exact-fresh for the pushed state | latest ring frame, a few substeps stale |
 | Feel | deterministic, blocking, not smooth | server-paced, non-blocking, smooth |
 | Use | eval / training data | live viewer, patching your view into an app |
@@ -114,15 +115,16 @@ orchestrator** launches the instances (below) and the client just attaches.
 
 An **external orchestrator** launches the instances (across the network and/or
 several on one host) and hands the pool their addresses. Same-host instances each
-need a distinct gRPC port via `-URLabDmEnvPort=` (plus a distinct
-`-URLabInstanceIndex=` so their ZMQ ports don't collide):
+need a distinct gRPC port via `-URLabNet=grpc=` (plus a distinct `index=` in the
+same `-URLabNet` so their ZMQ ports don't collide):
 
 ```
 # instance 0
-... -URLabFastServe -URLabFastForcedOnly -URLabFastCameras \
-    -URLabInstanceIndex=0 -URLabDmEnvPort=50051
+... -URLabDrive=await -URLabCaps=serve,cameras \
+    -URLabNet=index=0,grpc=50051
 # instance 1
-... -URLabInstanceIndex=1 -URLabDmEnvPort=50052
+... -URLabDrive=await -URLabCaps=serve,cameras \
+    -URLabNet=index=1,grpc=50052
 ```
 Cross-host instances each just bind `:50051` on their own machine — no flag needed.
 
@@ -200,7 +202,7 @@ Runnable demo: `examples/owner_viewer_franka.py` (a Python owner + a native
 
 ## TL;DR for a downstream agent
 
-1. Boot the server with `-URLabFastServe -URLabFastForcedOnly -URLabFastCameras`.
+1. Boot the server with `-URLabDrive=await -URLabCaps=serve,cameras`.
 2. `with RenderClient.grpc(host, port) as rc: rc.load_xml(scene)`.
 3. Each step: `rc.render_mjdata(model, data, cameras=[...])`; drive your own view
    with `user_pose=viewer_sync.free_camera_pose(...)` + `USER_CAMERA`.

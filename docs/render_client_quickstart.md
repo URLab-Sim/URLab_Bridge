@@ -8,50 +8,70 @@ returns rendered camera images. UE never simulates.
 Everything goes through the high-level `RenderClient` — never hand-roll op dicts,
 wire keys, or transports.
 
+> **Flags note (Aug 2026):** the render server's launch surface was rewritten by
+> the "Render migration" (W18 / commit `2da60f6`). The old `-URLabFast*` flags were
+> **deleted** and are now silently ignored — a boot with them binds no listener and
+> the server never serves. This doc uses the current five-flag surface
+> (`-URLabDrive` / `-URLabCaps` / `-URLabModel` / `-URLabScene` / `-URLabNet`); the
+> canonical grammar lives in `Source/URLab/Public/MuJoCo/Fast/MjLauncherFlags.h`.
+
 ---
 
 ## 1. Start the render server (once)
 
 Use the packaged/staged build. Boot it *client-driven* (no model at boot — the
-client uploads one over the wire):
+client uploads one over the wire) with `-URLabDrive=await`:
 
 ```bash
 cd /home/buzz/Documents/urlab_debug
-URLabTest/Saved/StagedBuilds/Linux/URLabTest.sh /Game/Maps/Entry \
-    -URLabFastServe -URLabFastCameras -URLabFastForcedOnly \
+URLabTest/Saved/StagedBuilds/Linux/URLabTest.sh /Game/FastPath/FastPathRender \
+    -URLabDrive=await -URLabCaps=serve,cameras -URLabScene=cammax=0 \
     -RenderOffScreen -nosplash -unattended -stdout
 ```
 
 | flag | why |
 |------|-----|
-| `-URLabFastServe` | come up with **no** model; the gRPC/ZMQ listeners bind immediately and wait for the client to `load_*`. |
-| `-URLabFastCameras` | build + stream the capturing cameras (without it `render()` returns nothing). |
-| `-URLabFastForcedOnly` | cameras capture *only* on a `render()` request — exact-fresh, lowest latency. Omit for smooth streaming/viewer mode. |
+| `-URLabDrive=await` | come up with **no** model; the gRPC/ZMQ listeners bind immediately and wait for the client to `load_*`. (was `-URLabFastServe`) |
+| `-URLabCaps=serve,cameras` | `serve` stands up the render bridge — **required on the `await` path**, serve is *not* implicit there (without it no manager is created and `:50051` never binds); `cameras` builds + streams the capturing cameras (without it `render()` returns nothing). (was `-URLabFastCameras`; serve used to be implicit) |
+| `-URLabScene=cammax=0` | don't cap camera height (the default caps model cameras at 480px; the `user` cam is unaffected). (was `-URLabFastCamMaxHeight=0`) |
 | `-RenderOffScreen` | headless. |
-| `/Game/Maps/Entry` | any **lit** map (SkyLight + reflections). An unlit map leaves metallics looking flat. |
+| `/Game/FastPath/FastPathRender` | the dedicated **lit** render map (SkyLight + reflections). An unlit map leaves metallics looking flat / dark. |
 
-It listens on **gRPC 50051** and **ZMQ 5559** by default. To run several servers
-on one host, give each a distinct `-URLabDmEnvPort=<n>` and `-URLabInstanceIndex=<n>`.
+It listens on **gRPC 50051** and **ZMQ 5559** by default (force gRPC's port with
+`-URLabNet=grpc=50051`). To run several servers on one host, give each a distinct
+`-URLabNet=grpc=<n>,index=<n>`.
+
+Ready when the log prints:
+```
+LogURLabDmEnvRpc: dm_env_rpc gRPC server listening on 0.0.0.0:50051
+LogURLabNet: UURLabBridgeServer: control RPC transport 'dm_env_rpc' bound
+```
 
 ### Two rendering modes — pick one per instance
 
 Same cameras, same API. The difference is who paces capture and whether it blocks.
 A single server does **one** mode — a forced capture stalls the render thread a
-smooth stream needs, so they can't share an instance.
+smooth stream needs, so they can't share an instance. The mode is the **Drive**:
 
 | | **Forced** (eval) | **Async / streaming** (viewer) |
 |---|---|---|
-| Server boot | **with** `-URLabFastForcedOnly` | **without** it |
+| Server Drive | `-URLabDrive=push` | `-URLabDrive=await` (or any non-`push`) |
+| Cameras | capture **only** on a `render()` request | capture **continuously** into a ring |
 | Client call | `render_mjdata(..., delay=0)` | `render_mjdata(..., delay=N)` |
 | Frame | exact-fresh for the pushed state | latest ring frame, a few substeps stale |
 | Feel | deterministic, blocking, not smooth | server-paced, non-blocking, smooth |
 | Use for | eval / training data | live viewer, patching a view into an app |
 
-The boot command above is **forced**. For **async/streaming**, drop the one flag:
+The `await` boot above is **async-capable** (continuous capture) — you can still
+pass `delay=0` for an exact-fresh forced frame, or `delay=N` for a smooth ring
+frame. For a **forced-only** eval server (lowest latency, no ring), boot with
+`-URLabDrive=push`; preloading the model with `-URLabModel=` is the usual pairing
+(push serves `fastpath_render` and serve is implicit, but still list `cameras`):
 
 ```bash
-URLabTest/Saved/StagedBuilds/Linux/URLabTest.sh /Game/Maps/Entry \
-    -URLabFastServe -URLabFastCameras \
+URLabTest/Saved/StagedBuilds/Linux/URLabTest.sh /Game/FastPath/FastPathRender \
+    -URLabDrive=push -URLabModel=/abs/path/scene.xml \
+    -URLabCaps=serve,cameras -URLabScene=cammax=0 \
     -RenderOffScreen -nosplash -unattended -stdout
 ```
 
@@ -79,8 +99,8 @@ with RenderClient.grpc("127.0.0.1", 50051) as rc:
 
 The loop above is **forced** (`delay=0`, the default) — each `render_mjdata` returns
 the exact frame for the state you just pushed, and blocks until it's captured.
-Against an **async/streaming** server (booted without `-URLabFastForcedOnly`), pass
-`delay=N` to pull the latest ring frame instead — non-blocking and smooth:
+Against an **async/streaming** server (`-URLabDrive=await`), pass `delay=N` to pull
+the latest ring frame instead — non-blocking and smooth:
 
 ```python
     frames = rc.render_mjdata(model, data, cameras=["cam0"], delay=0.05)
@@ -117,8 +137,8 @@ Against an **async/streaming** server (booted without `-URLabFastForcedOnly`), p
   camera is a full scene capture. Omit `cameras` to render every camera.
 - **`CameraFrame`** → `.to_bgr()` (OpenCV), `.to_rgb()`, or `.to_array()` (raw HxWx3).
 - **Resolution** comes from the model: `<camera resolution="1280 960">`. Changing it
-  is just a scene reload — no re-cook. (Server default caps height at 480 unless it
-  was launched with `-URLabFastCamMaxHeight=0`.)
+  is just a scene reload — no re-cook. (Server default caps model-camera height at
+  480 unless it was launched with `-URLabScene=cammax=0`.)
 
 ---
 
@@ -156,11 +176,17 @@ with mujoco.viewer.launch_passive(model, data) as viewer:
         # frames["user"].to_bgr() is the UE render from the viewer's viewpoint
 ```
 
+A headless variant (no GUI) that drives the `user` cam from a plain `MjvCamera`
+lives in `smoke_usercam.py` at the repo root — a good end-to-end smoke test.
+
 ---
 
 ## Runnable examples
 
-- `examples/render_client_example.py` — minimal load + render loop.
+- `examples/render_client_example.py` — minimal render loop. NOTE: it does **not**
+  call `load_xml`, so it assumes the server already holds a matching model (either
+  a `-URLabModel=` boot, or a prior client `load_xml`). For an empty `await` server,
+  call `rc.load_xml(...)` first (see `smoke_usercam.py`) or you'll get black frames.
 - `examples/render_server_viewer.py` — passive viewer + the `"user"` camera painted
   as a picture-in-picture (the pattern in §4).
 - `examples/render_pool_example.py` — many servers, one client (`RenderPool`).
@@ -168,5 +194,7 @@ with mujoco.viewer.launch_passive(model, data) as viewer:
 ## See also
 
 - `docs/render_server_guide.md` — the fuller how-it-works guide.
-- `../UnrealRoboticsLab/docs/render_server_flags.md` — every `-URLabFast*` flag.
+- `../UnrealRoboticsLab/docs/render_server_flags.md` — per-flag reference (its
+  `-URLabFast*` names are the **legacy lineage**; each maps to a current flag via
+  `MjLauncherFlags.h`).
 - `../UnrealRoboticsLab/docs/render_server_packaging.md` — how to cook the server.

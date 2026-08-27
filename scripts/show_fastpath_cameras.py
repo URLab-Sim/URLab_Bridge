@@ -3,7 +3,8 @@
 # Licensed under the Apache License, Version 2.0.
 """Show the live camera feeds a UE fast-path render server publishes.
 
-A fast-path renderer launched with ``-URLabFastCameras`` renders each MJB camera
+A fast-path renderer launched with ``-URLabCaps=...,cameras`` (formerly
+``-URLabFastCameras``) renders each MJB camera
 and publishes its frames over ZMQ: camera ``i`` on ``tcp://<host>:<base+i>``, as
 a 2-frame multipart message ``[topic ][40-byte meta + BGRA8 pixels]``. This
 subscribes to the whole port range and shows each camera in its own OpenCV

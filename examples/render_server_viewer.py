@@ -7,7 +7,7 @@ This is the end-to-end integration: one Python process that
   1. loads a MuJoCo scene itself (any menagerie scene works),
   2. connects to the render server over gRPC and uploads the model -- the server
      spawns its renderer on demand, so it can be booted on a bare empty level
-     with no ``-URLabFast*`` model flag,
+     with no ``-URLabModel`` model flag,
   3. opens MuJoCo's own ``launch_passive`` viewer so you can fly around, and
   4. each frame mirrors the sim state + your viewer camera to the server, pulls
      the UE render of *your* viewpoint back, and paints it into the viewer as a
@@ -21,14 +21,15 @@ Two server regimes, selected with ``--mode`` (they can't share one instance --
 forced capture stalls the render thread a smooth stream needs):
 
   * ``forced``  -- exact-fresh, client-paced, blocking (``delay=0``). Boot the
-    server with ``-URLabFastForcedOnly``. Deterministic, not buttery smooth.
+    server with ``-URLabDrive=await``; delay=0 gives exact forced frames.
+    Deterministic, not buttery smooth.
   * ``viewer``  -- server-paced ring frames, a few substeps stale but smooth
-    (``delay=N``). Boot the server WITHOUT ``-URLabFastForcedOnly``.
+    (``delay=N``). Same ``-URLabDrive=await`` boot; the client delay picks the mode.
 
 Boot a server (empty level, no model needed) e.g.::
 
     UnrealEditor URLabTest.uproject /Game/FastPath/FastPathRender -game \
-        -URLabFastServe -URLabFastForcedOnly -URLabFastCameras -RenderOffScreen \
+        -URLabDrive=await -URLabCaps=serve,cameras -RenderOffScreen \
         -nosplash -unattended -stdout
 
 Run::

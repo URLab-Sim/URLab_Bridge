@@ -37,11 +37,11 @@ echo "[pool] launching $N instance(s), gRPC ports ${BASE_PORT}..$((BASE_PORT+N-1
 for i in $(seq 0 $((N-1))); do
   port=$((BASE_PORT + i))
   log="$LOGDIR/instance_$i.log"
-  # Same-host instances need a distinct gRPC port (-URLabDmEnvPort) AND a distinct
-  # -URLabInstanceIndex so their ZMQ ports don't collide either.
+  # Same-host instances need a distinct gRPC port (-URLabNet=grpc=) AND a distinct
+  # index= (in the same -URLabNet) so their ZMQ ports don't collide either.
   "$UE" "$UPROJ" "$MAP" -game \
-    -URLabFastServe -URLabFastForcedOnly -URLabFastCameras -URLabFastCamMaxHeight=0 \
-    -URLabInstanceIndex="$i" -URLabDmEnvPort="$port" \
+    -URLabDrive=await -URLabCaps=serve,cameras -URLabScene=cammax=0 \
+    -URLabNet=index="$i",grpc="$port" \
     -RenderOffScreen -nosplash -unattended -stdout \
     -abslog="$log" > "$log.stdout" 2>&1 &
   pids+=("$!")

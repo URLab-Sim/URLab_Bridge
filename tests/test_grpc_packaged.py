@@ -3,7 +3,7 @@
 """Integration tests for the packaged headless render server over gRPC (dm_env_rpc).
 
 Requires the packaged Linux server (UrlLinux.sh) running with:
-  -URLabFastMjb=<scene.mjb> -URLabFastCameras -URLabFastForcedOnly -RenderOffScreen -nosplash
+  -URLabDrive=push -URLabModel=<scene.mjb> -URLabCaps=serve,cameras -RenderOffScreen -nosplash
 """
 from __future__ import annotations
 
